@@ -15,6 +15,7 @@ llm_pro_mode/
 ├── __init__.py              # Package initialization
 ├── main.py                  # Main entry point and CLI argument parsing
 ├── config.py                # Configuration management and global state
+├── profile_manager.py       # JSON profile configuration system
 ├── core/                    # Core business logic
 │   ├── __init__.py
 │   ├── llm_client.py        # LLM API calls and streaming
@@ -37,13 +38,16 @@ llm_pro_mode/
 ### Design Principles
 
 **Separation of Concerns**: Each module has a single responsibility:
-- `config.py`: Centralized configuration management
+- `config.py`: Centralized configuration management with environment variable and CLI argument support
+- `profile_manager.py`: JSON-based configuration profiles with multi-location file resolution
 - `core/`: Business logic and LLM processing
 - `interfaces/`: User interaction layers
 - `tracing/`: Debugging and logging utilities
 - `models/`: Data structures and validation
 
 **Dependency Injection**: Global state is managed through the config module, eliminating global variables and improving testability.
+
+**Flexible Configuration**: Multi-layer configuration system supporting environment variables, JSON profiles, and command-line arguments with clear precedence rules.
 
 **Multi-Interface Design**: Three distinct modes of operation:
 - CLI mode: Direct command-line execution with progress bars
@@ -64,6 +68,11 @@ pip install -e .
 **Direct module execution**:
 ```bash
 python -m llm_pro_mode.main
+```
+
+**Direct script execution** (without installation):
+```bash
+python llm_pro.py
 ```
 
 ### Running the Application
@@ -95,6 +104,57 @@ Set these environment variables or pass as arguments:
 - `LLM_PRO_MODEL`: Default model name
 - `LLM_PRO_API_BASE`: API base URL
 - `LLM_PRO_API_KEY`: API key
+
+### Profile Management System
+
+The application includes a JSON-based profile management system that allows saving and reusing different API configurations:
+
+**Configuration file locations** (checked in order):
+1. `./llm_pro_config.json` (project-local config)
+2. `~/.llm-pro-mode/config.json` (user config)
+3. `./config.json` (fallback)
+
+**Profile commands**:
+```bash
+# List all available profiles
+llm-pro-mode --list-profiles
+
+# Show specific profile details
+llm-pro-mode --show-profile openai
+
+# Use a specific profile
+llm-pro-mode --profile grok --prompt "Your prompt here"
+
+# Save current configuration as a new profile
+llm-pro-mode --save-profile my-config --model "gpt-4" --api_base "https://api.openai.com/v1"
+
+# Set default profile
+llm-pro-mode --set-default-profile openai
+
+# Delete a profile
+llm-pro-mode --delete-profile old-config
+```
+
+**Configuration priority** (highest to lowest):
+1. Command line arguments
+2. JSON profile configuration
+3. Environment variables
+4. Default values
+
+### Stdin Support
+
+The CLI mode supports reading prompts from stdin:
+```bash
+# Read from stdin with '-' flag
+echo "Explain machine learning" | llm-pro-mode -p -
+
+# Read from file via stdin
+llm-pro-mode -p - < input.txt
+
+# Interactive stdin input
+llm-pro-mode --prompt -
+# (then type your prompt and press Ctrl+D)
+```
 
 ### Testing and Debug
 
