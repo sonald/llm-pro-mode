@@ -1,5 +1,6 @@
 """Command-line interface functionality."""
 
+import sys
 import anyio
 from rich.markdown import Markdown
 
@@ -24,7 +25,24 @@ async def run_cli(prompt: str, n_runs: int, trace_logger: TraceLogger = None):
 
 def cli_main(args):
     """Main CLI entry point."""
-    if not args.prompt:
+    # Handle stdin input for prompt
+    prompt = args.prompt
+    if prompt == "-":
+        # Read from stdin
+        try:
+            if sys.stdin.isatty():
+                console.print("[yellow]Reading from stdin (press Ctrl+D when done):[/yellow]")
+            prompt = sys.stdin.read().strip()
+            if not prompt:
+                console.print("[bold red]Error: no input received from stdin[/bold red]")
+                return 1
+        except KeyboardInterrupt:
+            console.print("\n[yellow]⏹️  输入已取消[/yellow]")
+            return 0
+        except Exception as e:
+            console.print(f"[bold red]Error reading from stdin: {e}[/bold red]")
+            return 1
+    elif not prompt:
         console.print("[bold red]Error: prompt is required in CLI mode[/bold red]")
         return 1
 
@@ -38,7 +56,7 @@ def cli_main(args):
         )
 
     try:
-        anyio.run(run_cli, args.prompt, args.n_runs, trace_logger)
+        anyio.run(run_cli, prompt, args.n_runs, trace_logger)
         return 0
     except (KeyboardInterrupt, anyio.get_cancelled_exc_class()):
         console.print("\n[yellow]⏹️  任务已中断，正在清理资源...[/yellow]")

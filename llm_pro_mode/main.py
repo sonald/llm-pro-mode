@@ -23,6 +23,8 @@ def setup_argument_parser():
 1. CLI模式 (CLI Mode) - 命令行直接执行:
    llm-pro-mode --prompt "解释什么是机器学习" --model "gpt-4"
    llm-pro-mode -p "写一个Python排序函数" -m "claude-3-sonnet" -n 5
+   llm-pro-mode -p - < input.txt  # 从标准输入读取提示词
+   echo "解释什么是机器学习" | llm-pro-mode -p -  # 通过管道传递提示词
 
 2. TUI模式 (TUI Mode) - 交互式终端界面:
    llm-pro-mode --tui
@@ -164,7 +166,7 @@ API Key 环境变量引用 (Environment Variable Reference):
     exec_group.add_argument(
         "--prompt", "-p",
         type=str,
-        help="输入提示词 (仅CLI模式)"
+        help="输入提示词 (仅CLI模式)，使用 '-' 从标准输入读取"
     )
     exec_group.add_argument(
         "--n_runs", "-n",
