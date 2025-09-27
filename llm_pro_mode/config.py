@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 from rich.console import Console
 from dotenv import load_dotenv
 
@@ -168,6 +168,59 @@ class Config:
         )
 
         return self.profile_manager.add_profile(profile_name, profile)
+
+    def list_profiles(self) -> List[ProfileConfig]:
+        """Return all available profiles."""
+        if not self.profile_manager:
+            return []
+
+        config_file = self.profile_manager.load_config()
+        return [config_file.profiles[name] for name in config_file.profiles]
+
+    def iter_profiles(self) -> List[tuple[str, ProfileConfig]]:
+        """Return profile names with configurations."""
+        if not self.profile_manager:
+            return []
+
+        config_file = self.profile_manager.load_config()
+        return list(config_file.profiles.items())
+
+    def get_active_profile_name(self) -> Optional[str]:
+        """Return the currently active profile name if any."""
+        if self.profile_name:
+            return self.profile_name
+
+        if self.profile_manager and self.profile_manager.config_file:
+            return self.profile_manager.config_file.default_profile or None
+
+        if self.profile_manager:
+            config_file = self.profile_manager.load_config()
+            return config_file.default_profile or None
+
+        return None
+
+    def apply_profile(self, profile_name: str, *, make_default: bool = False) -> bool:
+        """Apply the specified profile and optionally set it as default."""
+        if not self.profile_manager:
+            return False
+
+        profile = self.profile_manager.get_profile(profile_name)
+        if not profile:
+            return False
+
+        self.profile_name = profile_name
+        self.model_name = profile.model_name
+        self.api_base = profile.api_base
+        self._original_api_key = profile.api_key
+        self.api_key = self._resolve_api_key(profile.api_key)
+
+        if make_default:
+            config_file = self.profile_manager.load_config()
+            config_file.default_profile = profile_name
+            self.profile_manager.config_file = config_file
+            self.profile_manager.save_config()
+
+        return True
 
     def get_effective_config_summary(self) -> str:
         """Get a summary of the effective configuration and its sources."""

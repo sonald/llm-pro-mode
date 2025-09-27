@@ -4,11 +4,19 @@ import json
 import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..models.schemas import WebSocketMessage, TaskUpdate, CompletionRequest
+from ..config import config
+from ..models.schemas import (
+    WebSocketMessage,
+    TaskUpdate,
+    CompletionRequest,
+    ProfileListResponse,
+    ProfileSummary,
+    ProfileSelectRequest,
+)
 from ..core.processor import main as process_main
 from ..tracing.logger import TraceLogger
 
@@ -29,6 +37,22 @@ def _normalize_stream_content(value) -> str:
                     return candidate
         return json.dumps(value, ensure_ascii=False)
     return str(value)
+
+
+def _profile_api_key_preview(value: Optional[str]) -> Optional[str]:
+    """Return a safe preview for API key values."""
+
+    if not value:
+        return None
+
+    if value.isupper() and '_' in value and not value.startswith(('sk-', 'sk_', 'xai-', 'ant-')):
+        # Likely an environment variable reference, safe to display as-is
+        return value
+
+    if len(value) <= 6:
+        return value[:2] + "***"
+
+    return f"{value[:4]}...{value[-2:]}"
 
 
 class WebSocketManager:
@@ -271,6 +295,55 @@ def create_web_app() -> FastAPI:
     # Mount static files
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    def build_profile_response() -> ProfileListResponse:
+        """Aggregate profile metadata for API responses."""
+
+        if not config.profile_manager:
+            return ProfileListResponse(
+                profiles=[],
+                active_profile=None,
+                default_profile=None,
+            )
+
+        config_file = config.profile_manager.load_config()
+        profiles = [
+            ProfileSummary(
+                name=name,
+                description=profile.description,
+                model_name=profile.model_name,
+                api_base=profile.api_base,
+                api_key_preview=_profile_api_key_preview(profile.api_key),
+            )
+            for name, profile in config_file.profiles.items()
+        ]
+
+        active_profile = config.get_active_profile_name()
+        default_profile = config_file.default_profile or None
+
+        return ProfileListResponse(
+            profiles=profiles,
+            active_profile=active_profile,
+            default_profile=default_profile,
+        )
+
+    @app.get("/api/profiles", response_model=ProfileListResponse)
+    async def get_profiles():
+        """Return available profiles and current selection."""
+        return build_profile_response()
+
+    @app.post("/api/profiles/select", response_model=ProfileListResponse)
+    async def select_profile(request: ProfileSelectRequest):
+        """Apply a profile and optionally mark it as default."""
+
+        if not config.profile_manager:
+            raise HTTPException(status_code=400, detail="Profile management not configured")
+
+        success = config.apply_profile(request.name, make_default=request.make_default)
+        if not success:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        return build_profile_response()
+
     @app.get("/", response_class=HTMLResponse)
     async def read_root():
         """Serve the main web interface."""
@@ -437,7 +510,6 @@ async def call_llm_with_websocket(
 ):
     """Call LLM with WebSocket progress updates."""
     from ..core.llm_client import call_llm_streaming
-    from ..config import config
 
     task_trace = None
     response_content = ""
@@ -534,7 +606,6 @@ async def synthesize_result_websocket(
 ) -> str:
     """Synthesize multiple candidate results using WebSocket streaming."""
     from ..core.llm_client import call_llm_streaming
-    from ..config import config
 
     try:
         print(f"[DEBUG] Synthesis: Processing {len(candidates)} candidates")

@@ -1,6 +1,6 @@
 """Pydantic models and data schemas."""
 
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, List
 from pydantic import BaseModel
 
 
@@ -97,6 +97,31 @@ class FinalResultMessage(WebSocketMessage):
     type: str = "final_result"
     content: str
     stats: Optional[Dict[str, Any]] = None
+
+
+class ProfileSummary(BaseModel):
+    """Profile metadata for UI consumption."""
+
+    name: str
+    description: Optional[str] = None
+    model_name: str
+    api_base: str
+    api_key_preview: Optional[str] = None
+
+
+class ProfileListResponse(BaseModel):
+    """Response payload for available profiles."""
+
+    profiles: List[ProfileSummary]
+    active_profile: Optional[str]
+    default_profile: Optional[str]
+
+
+class ProfileSelectRequest(BaseModel):
+    """Request body for selecting a profile."""
+
+    name: str
+    make_default: bool = False
 
 
 class ErrorMessage(WebSocketMessage):

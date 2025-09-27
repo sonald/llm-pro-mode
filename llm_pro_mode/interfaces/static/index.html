@@ -12,7 +12,10 @@
     <div class="app-container">
         <!-- Header -->
         <header class="app-header">
-            <h1>LLM Pro Mode</h1>
+            <div class="header-title">
+                <h1>LLM Pro Mode</h1>
+                <span class="profile-badge" id="active-profile">Profile: --</span>
+            </div>
             <div class="header-controls">
                 <button id="settings-btn" class="icon-btn" title="Settings">⚙️</button>
                 <button id="clear-btn" class="icon-btn" title="Clear Chat">🗑️</button>
@@ -150,6 +153,17 @@
             </div>
             <div class="modal-content">
                 <div class="settings-form">
+                    <div class="form-group">
+                        <label for="profile-select">Profile</label>
+                        <div class="profile-select-row">
+                            <select id="profile-select"></select>
+                            <button type="button" id="apply-profile" class="secondary-btn">Apply</button>
+                        </div>
+                        <label class="checkbox-inline">
+                            <input type="checkbox" id="set-default-profile">
+                            Set as default
+                        </label>
+                    </div>
                     <div class="form-group">
                         <label for="model-select">Model:</label>
                         <input type="text" id="model-select" placeholder="Enter model name">

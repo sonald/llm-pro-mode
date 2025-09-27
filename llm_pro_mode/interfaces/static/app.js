@@ -17,9 +17,14 @@ class LLMProWebApp {
             totalTasks: 0
         };
 
+        this.profileData = null;
+        this.activeProfileName = null;
+        this.defaultProfileName = null;
+
         this.initializeMarked();
         this.initializeElements();
         this.bindEvents();
+        this.fetchProfiles();
         this.connectWebSocket();
     }
 
@@ -89,6 +94,17 @@ class LLMProWebApp {
         this.settingsBtn = document.getElementById('settings-btn');
         this.settingsClose = document.getElementById('settings-close');
         this.clearBtn = document.getElementById('clear-btn');
+
+        // Profile controls
+        this.activeProfileLabel = document.getElementById('active-profile');
+        this.profileSelect = document.getElementById('profile-select');
+        this.applyProfileBtn = document.getElementById('apply-profile');
+        this.setDefaultProfileCheckbox = document.getElementById('set-default-profile');
+
+        // Settings inputs
+        this.modelInput = document.getElementById('model-select');
+        this.apiBaseInput = document.getElementById('api-base');
+        this.apiKeyInput = document.getElementById('api-key');
     }
 
     bindEvents() {
@@ -127,6 +143,13 @@ class LLMProWebApp {
         // Settings form
         document.getElementById('save-settings').addEventListener('click', () => this.saveSettings());
         document.getElementById('cancel-settings').addEventListener('click', () => this.closeSettingsModal());
+
+        if (this.applyProfileBtn) {
+            this.applyProfileBtn.addEventListener('click', () => this.handleProfileApply());
+        }
+        if (this.profileSelect) {
+            this.profileSelect.addEventListener('change', () => this.handleProfileSelectionChange());
+        }
 
         // ESC key handling
         document.addEventListener('keydown', (e) => {
@@ -175,6 +198,133 @@ class LLMProWebApp {
         } catch (error) {
             console.error('Failed to connect:', error);
             this.updateConnectionStatus('disconnected', 'Failed to Connect');
+        }
+    }
+
+    async fetchProfiles() {
+        if (!this.profileSelect) return;
+
+        try {
+            const response = await fetch('/api/profiles');
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            this.populateProfileControls(data);
+        } catch (error) {
+            console.error('Failed to load profiles:', error);
+        }
+    }
+
+    populateProfileControls(data) {
+        this.profileData = data;
+        this.activeProfileName = data.active_profile || null;
+        this.defaultProfileName = data.default_profile || null;
+
+        if (this.profileSelect) {
+            this.profileSelect.innerHTML = '';
+
+            data.profiles.forEach(profile => {
+                const option = document.createElement('option');
+                option.value = profile.name;
+                option.textContent = profile.description ? `${profile.name} - ${profile.description}` : profile.name;
+                option.dataset.model = profile.model_name || '';
+                option.dataset.apiBase = profile.api_base || '';
+                option.dataset.apiKeyPreview = profile.api_key_preview || '';
+                this.profileSelect.appendChild(option);
+            });
+
+            if (data.active_profile) {
+                this.profileSelect.value = data.active_profile;
+            }
+
+            const hasProfiles = data.profiles.length > 0;
+            this.profileSelect.disabled = !hasProfiles;
+            if (this.applyProfileBtn) {
+                this.applyProfileBtn.disabled = !hasProfiles;
+            }
+            if (this.setDefaultProfileCheckbox) {
+                this.setDefaultProfileCheckbox.disabled = !hasProfiles;
+            }
+
+            this.handleProfileSelectionChange();
+        }
+
+        this.updateProfileBadge(this.activeProfileName);
+    }
+
+    handleProfileSelectionChange() {
+        if (!this.profileData || !this.profileSelect) {
+            return;
+        }
+
+        const selected = this.profileSelect.value;
+        const profile = this.profileData.profiles.find(item => item.name === selected);
+
+        if (this.setDefaultProfileCheckbox) {
+            this.setDefaultProfileCheckbox.checked = selected === this.defaultProfileName;
+        }
+
+        if (profile) {
+            this.previewProfileDetails(profile);
+        } else {
+            this.previewProfileDetails({ model_name: '', api_base: '', api_key_preview: '' });
+        }
+    }
+
+    updateProfileBadge(profileName) {
+        if (!this.activeProfileLabel) return;
+        const label = profileName ? `Profile: ${profileName}` : 'Profile: --';
+        this.activeProfileLabel.textContent = label;
+    }
+
+    previewProfileDetails(profile) {
+        if (this.modelInput) {
+            this.modelInput.value = profile.model_name || '';
+        }
+        if (this.apiBaseInput) {
+            this.apiBaseInput.value = profile.api_base || '';
+        }
+        if (this.apiKeyInput) {
+            this.apiKeyInput.value = '';
+            this.apiKeyInput.placeholder = profile.api_key_preview || 'sk-...';
+        }
+    }
+
+    async handleProfileApply() {
+        if (!this.profileSelect) return;
+
+        const selectedProfile = this.profileSelect.value;
+        if (!selectedProfile) return;
+
+        const makeDefault = this.setDefaultProfileCheckbox ? this.setDefaultProfileCheckbox.checked : false;
+
+        if (this.applyProfileBtn) {
+            this.applyProfileBtn.disabled = true;
+        }
+
+        try {
+            const response = await fetch('/api/profiles/select', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: selectedProfile, make_default: makeDefault })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText || `HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+            this.populateProfileControls(data);
+            this.updateMonitorStatus(`Profile set to ${data.active_profile || selectedProfile}`);
+            setTimeout(() => this.updateMonitorStatus('Ready'), 2000);
+        } catch (error) {
+            console.error('Failed to apply profile:', error);
+            this.updateMonitorStatus('Profile update failed');
+            setTimeout(() => this.updateMonitorStatus('Ready'), 3000);
+        } finally {
+            if (this.applyProfileBtn) {
+                this.applyProfileBtn.disabled = false;
+            }
         }
     }
 
@@ -603,6 +753,10 @@ class LLMProWebApp {
 
     openSettingsModal() {
         this.settingsModal.classList.add('active');
+        if (this.profileSelect && this.activeProfileName) {
+            this.profileSelect.value = this.activeProfileName;
+            this.handleProfileSelectionChange();
+        }
     }
 
     closeSettingsModal() {

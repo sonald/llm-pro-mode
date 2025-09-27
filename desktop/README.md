@@ -28,3 +28,5 @@ cargo tauri build
 The resulting installers/binaries will be placed under `src-tauri/target/release/bundle/`.
 
 The backend process is terminated automatically when the app window closes or the Tauri runtime exits.
+
+The in-app ⚙️ Settings dialog exposes a "Profile" selector so you can switch between saved LLM configurations and mark one as the default without leaving the desktop experience.
