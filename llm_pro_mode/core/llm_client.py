@@ -1,13 +1,203 @@
+
 """LLM client functionality for API calls and streaming."""
 
-from typing import Optional, AsyncGenerator, Tuple, Any
+from __future__ import annotations
+
 import json
-from litellm import acompletion
+from dataclasses import dataclass, field
+from typing import Any, AsyncGenerator, Dict, Literal, Optional, Tuple
+
 from anyio.streams.memory import MemoryObjectSendStream
+from litellm import acompletion
 from rich.progress import Progress, TaskID
 
 from ..config import config, console
 from ..tracing.logger import TraceLogger
+
+
+@dataclass(slots=True)
+class LLMRequest:
+    """Container for an LLM request configuration."""
+
+    prompt: str
+    system: Optional[str] = None
+    temperature: float = 0.7
+    max_tokens: Optional[int] = None
+    trace_logger: Optional[TraceLogger] = None
+    trace_id: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def build_messages(self) -> list[dict[str, str]]:
+        """Build litellm-compatible messages sequence."""
+        messages = [{"role": "user", "content": self.prompt}]
+        if self.system:
+            messages.insert(0, {"role": "system", "content": self.system})
+        return messages
+
+    def prompt_for_trace(self) -> str:
+        """Return combined prompt string for trace logging."""
+        if self.system:
+            return f"System: {self.system}\n\nUser: {self.prompt}"
+        return self.prompt
+
+
+@dataclass(slots=True)
+class LLMChunk:
+    """Represents a normalized piece of streaming output."""
+
+    kind: Literal["thinking", "content"]
+    text: str
+    token_count: int
+    thinking_count: int
+    finish_reason: Optional[str] = None
+
+
+@dataclass(slots=True)
+class LLMResult:
+    """Aggregated result returned by LLM streaming."""
+
+    content: str
+    finish_reason: Optional[str]
+    token_count: int
+    thinking_count: int
+
+
+class TraceSession:
+    """Utility class that manages trace lifecycle for an LLM request."""
+
+    def __init__(self, request: LLMRequest):
+        self._logger = request.trace_logger
+        self._trace_id = request.trace_id
+        self._request = request
+        self._task_trace: Optional[dict[str, Any]] = None
+
+    def start(self) -> "TraceSession":
+        """Start trace logging if available."""
+        if self._logger and self._trace_id:
+            metadata: Dict[str, Any] = {"temperature": self._request.temperature}
+            if self._request.max_tokens is not None:
+                metadata["max_tokens"] = self._request.max_tokens
+            if self._request.metadata:
+                metadata.update(self._request.metadata)
+
+            self._task_trace = self._logger.start_task(
+                task_id=self._trace_id,
+                model_name=config.model_name or "unknown",
+                input_prompt=self._request.prompt_for_trace(),
+                metadata=metadata,
+            )
+        return self
+
+    def log_thinking(self, text: str) -> None:
+        if self._logger and self._task_trace and text:
+            self._logger.log_thinking(self._task_trace, text)
+
+    def log_content(self, text: str) -> None:
+        if self._logger and self._task_trace and text:
+            self._logger.log_content(self._task_trace, text)
+
+    def finish(self, success: bool, error_msg: Optional[str] = None) -> None:
+        if self._logger and self._task_trace is not None:
+            self._logger.finish_task(self._task_trace, success=success, error_msg=error_msg)
+
+
+class LLMClient:
+    """High-level helper that coordinates streaming LLM calls."""
+
+    def __init__(self):
+        self._completion_fn = acompletion
+
+    async def stream_chunks(self, request: LLMRequest) -> AsyncGenerator[LLMChunk, None]:
+        """Stream normalized chunks from the configured LLM call."""
+        trace = TraceSession(request).start()
+        token_count = 0
+        thinking_count = 0
+        finish_reason: Optional[str] = None
+        error: Optional[Exception] = None
+
+        payload: Dict[str, Any] = {
+            "messages": request.build_messages(),
+            "model": config.model_name,
+            "base_url": config.api_base,
+            "api_key": config.api_key,
+            "stream": True,
+            "temperature": request.temperature,
+        }
+        if request.max_tokens is not None:
+            payload["max_tokens"] = request.max_tokens
+
+        try:
+            response = await self._completion_fn(**payload)
+
+            async for chunk in response:
+                if not hasattr(chunk, "choices") or not chunk.choices:
+                    continue
+
+                choice = chunk.choices[0]
+                finish_reason = getattr(choice, "finish_reason", finish_reason)
+                delta = choice.delta
+
+                reasoning_payload = None
+                if hasattr(delta, "reasoning_content") and getattr(delta, "reasoning_content"):
+                    reasoning_payload = getattr(delta, "reasoning_content")
+                elif hasattr(delta, "reasoning") and getattr(delta, "reasoning"):
+                    reasoning_payload = getattr(delta, "reasoning")
+
+                if reasoning_payload is not None:
+                    normalized_reasoning = _normalize_reasoning_payload(reasoning_payload)
+                    if normalized_reasoning:
+                        thinking_count += len(normalized_reasoning)
+                        trace.log_thinking(normalized_reasoning)
+                        yield LLMChunk(
+                            kind="thinking",
+                            text=normalized_reasoning,
+                            token_count=token_count,
+                            thinking_count=thinking_count,
+                            finish_reason=finish_reason,
+                        )
+
+                if hasattr(delta, "content") and delta.content:
+                    token_count += len(delta.content)
+                    trace.log_content(delta.content)
+                    yield LLMChunk(
+                        kind="content",
+                        text=delta.content,
+                        token_count=token_count,
+                        thinking_count=thinking_count,
+                        finish_reason=finish_reason,
+                    )
+
+        except Exception as exc:  # pragma: no cover - exercised via higher-level wrappers
+            error = exc
+            raise
+        finally:
+            trace.finish(success=error is None, error_msg=str(error) if error else None)
+
+    async def gather_result(self, request: LLMRequest) -> LLMResult:
+        """Collect the full response content while streaming.
+
+        Consumers who do not need per-chunk access can use this helper to
+        retrieve the aggregated content alongside counters.
+        """
+        parts: list[str] = []
+        finish_reason: Optional[str] = None
+        token_count = 0
+        thinking_count = 0
+
+        async for chunk in self.stream_chunks(request):
+            finish_reason = chunk.finish_reason or finish_reason
+            if chunk.kind == "thinking":
+                thinking_count = chunk.thinking_count
+            elif chunk.kind == "content":
+                parts.append(chunk.text)
+                token_count = chunk.token_count
+
+        return LLMResult(
+            content="".join(parts),
+            finish_reason=finish_reason,
+            token_count=token_count,
+            thinking_count=thinking_count,
+        )
 
 
 def _normalize_reasoning_payload(value: Any) -> str:
@@ -17,7 +207,9 @@ def _normalize_reasoning_payload(value: Any) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, list):
-        return "".join(_normalize_reasoning_payload(item) for item in value if item is not None)
+        return "".join(
+            _normalize_reasoning_payload(item) for item in value if item is not None
+        )
     if isinstance(value, dict):
         for key in ("text", "content", "message"):
             if key in value:
@@ -39,92 +231,59 @@ async def call_llm_tui(
     trace_id: Optional[str] = None,
 ):
     """Call LLM with TUI integration for progress updates."""
-    messages = [{"role": "user", "content": prompt}]
-    if system:
-        messages.insert(0, {"role": "system", "content": system})
+    request = LLMRequest(
+        prompt=prompt,
+        system=system,
+        temperature=temperature,
+        trace_logger=trace_logger,
+        trace_id=trace_id,
+    )
+    client = LLMClient()
 
-    # Start trace logging
-    task_trace = None
-    if trace_logger and trace_id:
-        full_prompt = f"System: {system}\n\nUser: {prompt}" if system else prompt
-        task_trace = trace_logger.start_task(
-            task_id=trace_id,
-            model_name=config.model_name or "unknown",
-            input_prompt=full_prompt,
-            metadata={"temperature": temperature},
-        )
-
-    # Update TUI progress
     if tui_app:
         tui_app.update_progress(task_name, "Starting")
 
+    parts: list[str] = []
+    token_count = 0
+    thinking_count = 0
+    finish_reason: Optional[str] = None
+
     try:
-        response = await acompletion(
-            messages=messages,
-            model=config.model_name,
-            base_url=config.api_base,
-            api_key=config.api_key,
-            stream=True,
-            temperature=temperature,
-        )
+        async for chunk in client.stream_chunks(request):
+            finish_reason = chunk.finish_reason or finish_reason
+            if chunk.kind == "thinking":
+                thinking_count = chunk.thinking_count
+                if tui_app:
+                    tui_app.update_progress(
+                        task_name,
+                        "Thinking",
+                        f"{thinking_count} thinking tokens",
+                    )
+            elif chunk.kind == "content":
+                parts.append(chunk.text)
+                token_count = chunk.token_count
+                if tui_app:
+                    tui_app.update_progress(
+                        task_name,
+                        "Generating",
+                        f"{token_count} tokens",
+                    )
 
-        if tui_app:
-            tui_app.update_progress(task_name, "Receiving response")
-
-        result = ""
-        token_count = 0
-        thinking_count = 0
-        finish_reason = None
-        async for chunk in response:
-            if hasattr(chunk, "choices") and chunk.choices and len(chunk.choices) > 0:
-                delta = chunk.choices[0].delta
-                finish_reason = getattr(chunk.choices[0], "finish_reason", "Done")
-
-                # Handle models which emit reasoning/thinking tokens
-                reasoning_text = None
-                if hasattr(delta, "reasoning_content") and getattr(
-                    delta, "reasoning_content"
-                ):
-                    reasoning_text = getattr(delta, "reasoning_content")
-                elif hasattr(delta, "reasoning") and getattr(delta, "reasoning"):
-                    reasoning_text = getattr(delta, "reasoning")
-
-                if reasoning_text:
-                    normalized_reasoning = _normalize_reasoning_payload(reasoning_text)
-                    thinking_count += len(normalized_reasoning)
-                    # Log thinking content to trace
-                    if trace_logger and normalized_reasoning:
-                        trace_logger.log_thinking(task_trace, normalized_reasoning)
-                    if tui_app:
-                        tui_app.update_progress(task_name, "Thinking", f"{thinking_count} thinking tokens")
-
-                if hasattr(delta, "content") and delta.content:
-                    result += delta.content
-                    token_count += len(delta.content)
-                    # Log content to trace
-                    if trace_logger:
-                        trace_logger.log_content(task_trace, delta.content)
-                    if tui_app:
-                        tui_app.update_progress(task_name, "Generating", f"{token_count} tokens")
-
+        result_text = "".join(parts)
         async with tx:
-            await tx.send(result)
+            await tx.send(result_text)
 
         if tui_app:
-            tui_app.update_progress(task_name, f"Completed - {finish_reason}", f"{token_count} tokens, {thinking_count} thinking")
-
-        # Complete trace logging
-        if trace_logger:
-            trace_logger.finish_task(task_trace, success=True)
-        return result
-    except Exception as e:
+            tui_app.update_progress(
+                task_name,
+                f"Completed - {finish_reason or 'Done'}",
+                f"{token_count} tokens, {thinking_count} thinking",
+            )
+        return result_text
+    except Exception as exc:  # pragma: no cover - integration behaviour validated elsewhere
         if tui_app:
-            tui_app.update_progress(task_name, "Error", str(e))
-
-        # Log error to trace
-        if trace_logger:
-            trace_logger.finish_task(task_trace, success=False, error_msg=str(e))
-        console.print(f"[bold red]Error calling LLM: {e}[/]")
+            tui_app.update_progress(task_name, "Error", str(exc))
+        console.print(f"[bold red]Error calling LLM: {exc}[/]")
 
 
 async def call_llm(
@@ -138,92 +297,56 @@ async def call_llm(
     trace_id: Optional[str] = None,
 ):
     """Call LLM with progress bar integration."""
-    messages = [{"role": "user", "content": prompt}]
-    if system:
-        messages.insert(0, {"role": "system", "content": system})
+    request = LLMRequest(
+        prompt=prompt,
+        system=system,
+        temperature=temperature,
+        trace_logger=trace_logger,
+        trace_id=trace_id,
+    )
+    client = LLMClient()
 
-    # Start trace logging
-    task_trace = None
-    if trace_logger and trace_id:
-        full_prompt = f"System: {system}\n\nUser: {prompt}" if system else prompt
-        task_trace = trace_logger.start_task(
-            task_id=trace_id,
-            model_name=config.model_name or "unknown",
-            input_prompt=full_prompt,
-            metadata={"temperature": temperature},
-        )
+    parts: list[str] = []
+    token_count = 0
+    thinking_count = 0
+    finish_reason: Optional[str] = None
 
     try:
-        response = await acompletion(
-            messages=messages,
-            model=config.model_name,
-            base_url=config.api_base,
-            api_key=config.api_key,
-            stream=True,
-            temperature=temperature,
-        )
+        async for chunk in client.stream_chunks(request):
+            finish_reason = chunk.finish_reason or finish_reason
+            if chunk.kind == "thinking":
+                thinking_count = chunk.thinking_count
+                if progress is not None and task_id is not None:
+                    progress.update(
+                        task_id,
+                        token_count=token_count,
+                        thinking_count=thinking_count,
+                    )
+            elif chunk.kind == "content":
+                parts.append(chunk.text)
+                token_count = chunk.token_count
+                if progress is not None and task_id is not None:
+                    progress.update(
+                        task_id,
+                        token_count=token_count,
+                        thinking_count=thinking_count,
+                    )
 
-        result = ""
-        token_count = 0
-        thinking_count = 0
-        finish_reason = None
-        async for chunk in response:
-            if hasattr(chunk, "choices") and chunk.choices and len(chunk.choices) > 0:
-                delta = chunk.choices[0].delta
-                finish_reason = getattr(chunk.choices[0], "finish_reason", "Done")
-
-                # Handle models which emit reasoning/thinking tokens
-                reasoning_text = None
-                if hasattr(delta, "reasoning_content") and getattr(
-                    delta, "reasoning_content"
-                ):
-                    reasoning_text = getattr(delta, "reasoning_content")
-                elif hasattr(delta, "reasoning") and getattr(delta, "reasoning"):
-                    reasoning_text = getattr(delta, "reasoning")
-
-                if reasoning_text:
-                    normalized_reasoning = _normalize_reasoning_payload(reasoning_text)
-                    thinking_count += len(normalized_reasoning)
-                    # Log thinking content to trace
-                    if trace_logger and normalized_reasoning:
-                        trace_logger.log_thinking(task_trace, normalized_reasoning)
-                    if progress is not None and task_id is not None:
-                        progress.update(
-                            task_id,
-                            token_count=token_count,
-                            thinking_count=thinking_count,
-                        )
-
-                if hasattr(delta, "content") and delta.content:
-                    result += delta.content
-                    token_count += len(delta.content)
-                    # Log content to trace
-                    if trace_logger:
-                        trace_logger.log_content(task_trace, delta.content)
-                    if progress is not None and task_id is not None:
-                        progress.update(
-                            task_id,
-                            token_count=token_count,
-                            thinking_count=thinking_count,
-                        )
-
+        result_text = "".join(parts)
         async with tx:
-            await tx.send(result)
+            await tx.send(result_text)
 
         if progress is not None and task_id is not None:
             progress.update(
                 task_id,
-                description=f"{task_id} {finish_reason}",
+                description=f"{task_id} {finish_reason or 'Done'}",
                 token_count=token_count,
                 thinking_count=thinking_count,
             )
             progress.stop_task(task_id)
 
-        # Complete trace logging
-        if trace_logger:
-            trace_logger.finish_task(task_trace, success=True)
-        return result
-    except Exception as e:
+        return result_text
+    except Exception as exc:  # pragma: no cover - integration behaviour validated elsewhere
         if progress is not None and task_id is not None:
             progress.update(
                 task_id,
@@ -232,11 +355,7 @@ async def call_llm(
                 thinking_count=thinking_count,
             )
             progress.stop_task(task_id)
-
-        # Log error to trace
-        if trace_logger:
-            trace_logger.finish_task(task_trace, success=False, error_msg=str(e))
-        console.print(f"[bold red]Error calling LLM: {e}[/]")
+        console.print(f"[bold red]Error calling LLM: {exc}[/]")
 
 
 async def call_llm_streaming(
@@ -252,62 +371,18 @@ async def call_llm_streaming(
     Yields:
         Tuple[str, str]: (chunk_type, content) where chunk_type is 'thinking' or 'content'
     """
-    messages = [{"role": "user", "content": prompt}]
-
-    # Start trace logging
-    task_trace = None
-    if trace_logger and trace_id:
-        task_trace = trace_logger.start_task(
-            task_id=trace_id,
-            model_name=config.model_name or "unknown",
-            input_prompt=prompt,
-            metadata={"temperature": temperature, "max_tokens": max_tokens},
-        )
+    request = LLMRequest(
+        prompt=prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        trace_logger=trace_logger,
+        trace_id=trace_id,
+    )
+    client = LLMClient()
 
     try:
-        response = await acompletion(
-            messages=messages,
-            model=config.model_name,
-            base_url=config.api_base,
-            api_key=config.api_key,
-            stream=True,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-
-        async for chunk in response:
-            if hasattr(chunk, "choices") and chunk.choices and len(chunk.choices) > 0:
-                delta = chunk.choices[0].delta
-
-                # Handle thinking/reasoning content
-                reasoning_text = None
-                if hasattr(delta, "reasoning_content") and getattr(delta, "reasoning_content"):
-                    reasoning_text = getattr(delta, "reasoning_content")
-                elif hasattr(delta, "reasoning") and getattr(delta, "reasoning"):
-                    reasoning_text = getattr(delta, "reasoning")
-
-                if reasoning_text:
-                    normalized_reasoning = _normalize_reasoning_payload(reasoning_text)
-                    if trace_logger and task_trace and normalized_reasoning:
-                        trace_logger.log_thinking(task_trace, normalized_reasoning)
-                    if normalized_reasoning:
-                        yield ("thinking", normalized_reasoning)
-
-                # Handle regular content
-                if hasattr(delta, "content") and delta.content:
-                    if trace_logger and task_trace:
-                        trace_logger.log_content(task_trace, delta.content)
-                    yield ("content", delta.content)
-
-        # Complete trace logging
-        if trace_logger and task_trace:
-            trace_logger.finish_task(task_trace, success=True)
-
-    except Exception as e:
-        # Log error to trace
-        if trace_logger and task_trace:
-            trace_logger.finish_task(task_trace, success=False, error_msg=str(e))
-
-        # Yield error as content
-        yield ("error", f"Error calling LLM: {str(e)}")
+        async for chunk in client.stream_chunks(request):
+            yield (chunk.kind, chunk.text)
+    except Exception as exc:
+        yield ("error", f"Error calling LLM: {exc}")
         # Don't re-raise - let the caller handle the error message
