@@ -72,6 +72,44 @@ class WebSocketManager:
                     self.disconnect(conn_id)
 
 
+class SimpleStatsCollector:
+    """Collects basic statistics without full tracing."""
+
+    def __init__(self):
+        self.total_tasks = 0
+        self.completed_tasks = 0
+        self.total_tokens = 0
+        self.total_duration_ms = 0
+        self.start_times: Dict[str, float] = {}
+
+    def start_task(self, task_id: str):
+        import time
+        self.total_tasks += 1
+        self.start_times[task_id] = time.time() * 1000
+
+    def complete_task(self, task_id: str, success: bool = True, token_count: int = 0):
+        import time
+        if success:
+            self.completed_tasks += 1
+        self.total_tokens += token_count
+
+        if task_id in self.start_times:
+            duration = time.time() * 1000 - self.start_times[task_id]
+            self.total_duration_ms += duration
+            del self.start_times[task_id]
+
+    def get_stats(self) -> Dict[str, Any]:
+        avg_duration = self.total_duration_ms / max(1, self.completed_tasks)
+        success_rate = self.completed_tasks / max(1, self.total_tasks)
+
+        return {
+            "total_tasks": self.total_tasks,
+            "total_tokens": self.total_tokens,
+            "avg_duration_ms": avg_duration,
+            "success_rate": success_rate
+        }
+
+
 class WebSocketProgressTracker:
     """Tracks task progress and sends updates via WebSocket."""
 
@@ -80,6 +118,7 @@ class WebSocketProgressTracker:
         self.connection_id = connection_id
         self.session_id = session_id
         self.tasks: Dict[str, Dict[str, Any]] = {}
+        self.stats_collector = SimpleStatsCollector()
 
     async def start_task(self, task_id: str, title: str, metadata: Optional[Dict] = None):
         """Start tracking a new task."""
@@ -94,6 +133,7 @@ class WebSocketProgressTracker:
             "start_time": None
         }
         self.tasks[task_id] = task_data
+        self.stats_collector.start_task(task_id)
 
         await self.manager.send_message(self.connection_id, {
             "type": "task_started",
@@ -105,16 +145,23 @@ class WebSocketProgressTracker:
     async def update_task_progress(self, task_id: str, progress: float, thinking: str = "", content: str = ""):
         """Update task progress."""
         if task_id not in self.tasks:
+            print(f"[DEBUG] Task {task_id} not found in tasks: {list(self.tasks.keys())}")
             return
 
         task = self.tasks[task_id]
         task["progress"] = progress
         normalized_thinking = _normalize_stream_content(thinking)
         normalized_content = _normalize_stream_content(content)
+
         if normalized_thinking:
             task["thinking"] += normalized_thinking
         if normalized_content:
             task["content"] += normalized_content
+
+        # Debug logging for synthesis task
+        if task_id == "synthesis":
+            print(f"[DEBUG] Synthesis task update - progress: {progress}, thinking_len: {len(normalized_thinking)}, content_len: {len(normalized_content)}")
+            print(f"[DEBUG] Synthesis task total - thinking_len: {len(task['thinking'])}, content_len: {len(task['content'])}")
 
         await self.manager.send_message(self.connection_id, {
             "type": "task_progress",
@@ -142,6 +189,10 @@ class WebSocketProgressTracker:
         if error:
             task["error"] = error
 
+        # Estimate token count from content length (rough approximation: 1 token ≈ 4 chars)
+        estimated_tokens = len(task["content"]) // 4
+        self.stats_collector.complete_task(task_id, success, estimated_tokens)
+
         await self.manager.send_message(self.connection_id, {
             "type": "task_completed",
             "task_id": task_id,
@@ -153,16 +204,41 @@ class WebSocketProgressTracker:
 
     async def start_synthesis(self):
         """Start synthesis phase."""
+        # Create synthesis task in progress tracker
+        await self.start_task("synthesis", "Synthesis", {"type": "synthesis"})
+
+        # Also send synthesis started message
         await self.manager.send_message(self.connection_id, {
             "type": "synthesis_started"
         })
 
-    async def complete_synthesis(self, success: bool = True, error: str = None):
+    async def complete_synthesis(self, success: bool = True, error: str = None,
+                                thinking: str = "", content: str = ""):
         """Complete synthesis phase."""
+        # Update synthesis task if it exists
+        if "synthesis" in self.tasks:
+            task = self.tasks["synthesis"]
+            task["status"] = "completed" if success else "failed"
+            task["progress"] = 100
+            normalized_thinking = _normalize_stream_content(thinking)
+            normalized_content = _normalize_stream_content(content)
+            if normalized_thinking:
+                task["thinking"] += normalized_thinking
+            if normalized_content:
+                task["content"] += normalized_content
+            if error:
+                task["error"] = error
+
+            # Estimate token count for synthesis
+            estimated_tokens = len(task["content"]) // 4
+            self.stats_collector.complete_task("synthesis", success, estimated_tokens)
+
         await self.manager.send_message(self.connection_id, {
             "type": "synthesis_completed",
             "success": success,
-            "error": error
+            "error": error,
+            "thinking": self.tasks.get("synthesis", {}).get("thinking", ""),
+            "content": self.tasks.get("synthesis", {}).get("content", "")
         })
 
     async def send_final_result(self, content: str, stats: Optional[Dict] = None):
@@ -260,10 +336,13 @@ async def handle_completion_request(connection_id: str, session_id: str, request
             trace_logger=trace_logger
         )
 
-        # Send final result
+        # Send final result with stats
         stats = None
         if trace_logger and trace_logger.enabled and trace_logger.traces:
             stats = trace_logger.get_stats()
+        else:
+            # Use basic stats collected during execution
+            stats = progress_tracker.stats_collector.get_stats()
 
         await progress_tracker.send_final_result(result or "No result generated", stats)
 
@@ -338,8 +417,6 @@ async def process_main_with_websocket(
             candidates, progress_tracker, trace_logger, synth_trace_id
         )
         print(f"[DEBUG] Synthesis completed")
-
-        await progress_tracker.complete_synthesis(success=True)
 
         return result
 
@@ -515,10 +592,20 @@ async def synthesize_result_websocket(
                 if trace_logger and task_trace and normalized_content:
                     trace_logger.log_thinking(task_trace, normalized_content)
 
+                # Update synthesis task progress with thinking
+                await progress_tracker.update_task_progress(
+                    "synthesis", 50, thinking=normalized_content
+                )
+
             elif chunk_type == "content":
                 response_content += normalized_content
                 if trace_logger and task_trace and normalized_content:
                     trace_logger.log_content(task_trace, normalized_content)
+
+                # Update synthesis task progress with content
+                await progress_tracker.update_task_progress(
+                    "synthesis", 80, content=normalized_content
+                )
 
             elif chunk_type == "error":
                 print(f"[DEBUG] Synthesis error: {normalized_content}")
@@ -532,12 +619,27 @@ async def synthesize_result_websocket(
         if trace_logger and task_trace:
             trace_logger.finish_task(task_trace, success=True)
 
+        # Complete synthesis task with collected content
+        await progress_tracker.complete_synthesis(
+            success=True,
+            thinking=thinking_content,
+            content=response_content
+        )
+
         return response_content
 
     except Exception as e:
         print(f"[DEBUG] Synthesis exception: {e}")
         if trace_logger and task_trace:
             trace_logger.finish_task(task_trace, success=False, error_msg=str(e))
+
+        # Complete synthesis task with error
+        await progress_tracker.complete_synthesis(
+            success=False,
+            error=str(e),
+            thinking=thinking_content,
+            content=response_content
+        )
         raise
 
 

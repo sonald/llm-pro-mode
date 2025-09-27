@@ -219,9 +219,19 @@ class TestWebSocketProgressTracker:
 
         await progress_tracker.start_synthesis()
 
-        # Verify WebSocket message
-        expected_message = {"type": "synthesis_started"}
-        mock_websocket.send_text.assert_called_once_with(json.dumps(expected_message))
+        # Verify WebSocket messages (task card + synthesis started)
+        assert mock_websocket.send_text.call_count == 2
+        task_started_call, synthesis_started_call = [
+            json.loads(call.args[0]) for call in mock_websocket.send_text.call_args_list
+        ]
+
+        assert task_started_call == {
+            "type": "task_started",
+            "task_id": "synthesis",
+            "title": "Synthesis",
+            "metadata": {"type": "synthesis"},
+        }
+        assert synthesis_started_call == {"type": "synthesis_started"}
 
     @pytest.mark.asyncio
     async def test_complete_synthesis_success(self, progress_tracker, websocket_manager, mock_websocket):
@@ -230,13 +240,25 @@ class TestWebSocketProgressTracker:
         connection_id = progress_tracker.connection_id
         websocket_manager.active_connections[connection_id] = mock_websocket
 
-        await progress_tracker.complete_synthesis(success=True)
+        await progress_tracker.start_synthesis()
+        mock_websocket.send_text.reset_mock()
+
+        final_thinking = "Consolidated reasoning"
+        final_content = "Final synthesized answer"
+
+        await progress_tracker.complete_synthesis(
+            success=True,
+            thinking=final_thinking,
+            content=final_content,
+        )
 
         # Verify WebSocket message
         expected_message = {
             "type": "synthesis_completed",
             "success": True,
-            "error": None
+            "error": None,
+            "thinking": final_thinking,
+            "content": final_content,
         }
         mock_websocket.send_text.assert_called_once_with(json.dumps(expected_message))
 
@@ -248,14 +270,26 @@ class TestWebSocketProgressTracker:
         websocket_manager.active_connections[connection_id] = mock_websocket
 
         error_msg = "Synthesis failed due to invalid candidates"
+        await progress_tracker.start_synthesis()
+        mock_websocket.send_text.reset_mock()
 
-        await progress_tracker.complete_synthesis(success=False, error=error_msg)
+        partial_thinking = "Partial reasoning"
+        partial_content = "Incomplete answer"
+
+        await progress_tracker.complete_synthesis(
+            success=False,
+            error=error_msg,
+            thinking=partial_thinking,
+            content=partial_content,
+        )
 
         # Verify WebSocket message
         expected_message = {
             "type": "synthesis_completed",
             "success": False,
-            "error": error_msg
+            "error": error_msg,
+            "thinking": partial_thinking,
+            "content": partial_content,
         }
         mock_websocket.send_text.assert_called_once_with(json.dumps(expected_message))
 

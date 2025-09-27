@@ -76,7 +76,17 @@ class TestWebUIIntegration:
                 await progress_tracker.complete_task(task_id, True)
 
             await progress_tracker.start_synthesis()
-            await progress_tracker.complete_synthesis(True)
+            await progress_tracker.update_task_progress(
+                "synthesis",
+                60,
+                thinking="Evaluating candidate overlap",
+                content="Preparing merged draft",
+            )
+            await progress_tracker.complete_synthesis(
+                True,
+                thinking="Final reasoning summary",
+                content="Integrated test result",
+            )
             return "Integrated test result"
 
         with patch('llm_pro_mode.interfaces.web.process_main_with_websocket', side_effect=mock_process_main_with_websocket), \
@@ -201,7 +211,7 @@ class TestWebUIIntegration:
             sent_messages = [json.loads(call.args[0]) for call in mock_websocket.send_text.call_args_list]
             message_types = [message["type"] for message in sent_messages]
 
-            assert message_types.count("task_started") == request_data["n_runs"]
+            assert message_types.count("task_started") == request_data["n_runs"] + 1
             assert message_types.count("task_completed") == request_data["n_runs"]
             assert "synthesis_started" in message_types
             assert "synthesis_completed" in message_types

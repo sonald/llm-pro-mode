@@ -9,6 +9,7 @@ class LLMProWebApp {
         this.currentTasks = new Map();
         this.messageHistory = [];
         this.isConnected = false;
+        this.activeModalTaskId = null;
         this.stats = {
             totalTokens: 0,
             avgTime: 0,
@@ -237,19 +238,35 @@ class LLMProWebApp {
     }
 
     handleTaskStarted(data) {
-        const task = {
-            id: data.task_id,
-            title: data.title || `Task ${data.task_id}`,
-            status: 'running',
-            progress: 0,
-            thinking: '',
-            content: '',
-            metadata: data.metadata || {},
-            startTime: Date.now()
-        };
+        const existingTask = this.currentTasks.get(data.task_id);
 
-        this.currentTasks.set(data.task_id, task);
-        this.renderProgressCard(task);
+        if (existingTask) {
+            existingTask.title = data.title || `Task ${data.task_id}`;
+            existingTask.status = 'running';
+            existingTask.progress = 0;
+            existingTask.metadata = { ...existingTask.metadata, ...(data.metadata || {}) };
+            existingTask.startTime = Date.now();
+            delete existingTask.endTime;
+            delete existingTask.duration;
+
+            this.updateProgressCard(existingTask);
+            this.refreshTaskModal(existingTask, { force: true });
+        } else {
+            const task = {
+                id: data.task_id,
+                title: data.title || `Task ${data.task_id}`,
+                status: 'running',
+                progress: 0,
+                thinking: '',
+                content: '',
+                metadata: data.metadata || {},
+                startTime: Date.now()
+            };
+
+            this.currentTasks.set(data.task_id, task);
+            this.renderProgressCard(task);
+        }
+
         this.updateTaskStats();
     }
 
@@ -268,6 +285,7 @@ class LLMProWebApp {
         }
 
         this.updateProgressCard(task);
+        this.refreshTaskModal(task);
     }
 
     handleTaskCompleted(data) {
@@ -293,35 +311,63 @@ class LLMProWebApp {
 
         this.updateProgressCard(task);
         this.updateTaskStats();
+        this.refreshTaskModal(task);
     }
 
     handleSynthesisStarted(data) {
         this.updateMonitorStatus('Synthesizing results...');
 
-        // Add synthesis task card
-        const synthTask = {
-            id: 'synthesis',
-            title: 'Synthesis',
-            status: 'running',
-            progress: 0,
-            thinking: '',
-            content: '',
-            metadata: {},
-            startTime: Date.now()
-        };
+        // Reuse existing synthesis task created by task_started message when available
+        let synthTask = this.currentTasks.get('synthesis');
 
-        this.currentTasks.set('synthesis', synthTask);
-        this.renderProgressCard(synthTask);
+        if (synthTask) {
+            synthTask.status = 'running';
+            synthTask.progress = synthTask.progress || 0;
+            synthTask.metadata = { ...synthTask.metadata, type: 'synthesis' };
+            synthTask.startTime = synthTask.startTime || Date.now();
+            this.updateProgressCard(synthTask);
+            this.refreshTaskModal(synthTask);
+        } else {
+            // Fallback: create task if the start notification was missed
+            synthTask = {
+                id: 'synthesis',
+                title: 'Synthesis',
+                status: 'running',
+                progress: 0,
+                thinking: '',
+                content: '',
+                metadata: { type: 'synthesis' },
+                startTime: Date.now()
+            };
+
+            this.currentTasks.set('synthesis', synthTask);
+            this.renderProgressCard(synthTask);
+        }
     }
 
     handleSynthesisCompleted(data) {
         const task = this.currentTasks.get('synthesis');
         if (task) {
-            task.status = 'completed';
+            task.status = data.success ? 'completed' : 'failed';
             task.progress = 100;
             task.endTime = Date.now();
             task.duration = task.endTime - task.startTime;
+
+            // Accumulate thinking and content data
+            if (data.thinking) {
+                task.thinking = data.thinking;
+            }
+
+            if (data.content) {
+                task.content = data.content;
+            }
+
+            if (data.error) {
+                task.error = data.error;
+            }
+
             this.updateProgressCard(task);
+            this.refreshTaskModal(task);
         }
 
         this.updateMonitorStatus('Completed');
@@ -446,7 +492,14 @@ class LLMProWebApp {
         const cardEl = document.createElement('div');
         cardEl.className = 'progress-card';
         cardEl.id = `task-${task.id}`;
-        cardEl.addEventListener('click', () => this.openTaskModal(task));
+
+        const taskId = task.id;
+        cardEl.addEventListener('click', () => {
+            const latestTask = this.currentTasks.get(taskId);
+            if (latestTask) {
+                this.openTaskModal(latestTask);
+            }
+        });
 
         cardEl.innerHTML = `
             <div class="progress-header">
@@ -494,17 +547,46 @@ class LLMProWebApp {
     }
 
     openTaskModal(task) {
-        this.taskModalTitle.textContent = `${task.title} - Details`;
-        this.thinkingContent.textContent = task.thinking || 'No thinking content available';
-        this.contentContent.innerHTML = this.renderMarkdown(task.content || 'No content available');
-        this.metadataContent.textContent = JSON.stringify(task.metadata, null, 2);
+        if (!task) return;
 
+        this.activeModalTaskId = task.id;
         this.taskModal.classList.add('active');
+        setTimeout(() => {
+            const latestTask = this.currentTasks.get(task.id);
+            this.populateTaskModal(latestTask || task);
+        }, 0);
         this.switchTab('thinking');
     }
 
     closeTaskModal() {
         this.taskModal.classList.remove('active');
+        this.activeModalTaskId = null;
+    }
+
+    refreshTaskModal(task, options = {}) {
+        if (!task) return;
+
+        const { force = false } = options;
+
+        if (!force && !this.taskModal.classList.contains('active')) return;
+        if (!force && this.activeModalTaskId !== task.id) return;
+
+        this.populateTaskModal(task);
+    }
+
+    populateTaskModal(task) {
+        if (!task) return;
+
+        this.taskModalTitle.textContent = `${task.title} - Details`;
+        this.thinkingContent.textContent = task.thinking || 'No thinking content available';
+
+        const contentHtml = task.content ? this.renderMarkdown(task.content) : '';
+        this.contentContent.innerHTML = contentHtml || '<p>No content available</p>';
+
+        const metadataText = task.metadata && Object.keys(task.metadata).length > 0
+            ? JSON.stringify(task.metadata, null, 2)
+            : 'No metadata available';
+        this.metadataContent.textContent = metadataText;
     }
 
     switchTab(tabName) {
