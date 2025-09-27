@@ -1,10 +1,12 @@
 """Web UI interface with WebSocket support for real-time task monitoring."""
 
+import asyncio
 import json
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Optional, Dict, Any
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -19,6 +21,9 @@ from ..models.schemas import (
 )
 from ..core.processor import main as process_main
 from ..tracing.logger import TraceLogger
+
+
+CancelledError = asyncio.CancelledError
 
 
 def _normalize_stream_content(value) -> str:
@@ -61,6 +66,7 @@ class WebSocketManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
         self.connection_tasks: Dict[str, str] = {}  # connection_id -> session_id
+        self.active_jobs: Dict[str, asyncio.Task] = {}
 
     async def connect(self, websocket: WebSocket, connection_id: str):
         """Accept WebSocket connection."""
@@ -70,11 +76,27 @@ class WebSocketManager:
 
     def disconnect(self, connection_id: str):
         """Remove WebSocket connection."""
+        job = self.active_jobs.pop(connection_id, None)
+        if job and not job.done():
+            job.cancel()
         if connection_id in self.active_connections:
             del self.active_connections[connection_id]
         if connection_id in self.connection_tasks:
             del self.connection_tasks[connection_id]
         print(f"WebSocket connection closed: {connection_id}")
+
+    def set_active_job(self, connection_id: str, job: Optional[asyncio.Task]):
+        """Track the active job for a connection."""
+        if job is None:
+            self.active_jobs.pop(connection_id, None)
+        else:
+            self.active_jobs[connection_id] = job
+
+    def cancel_active_job(self, connection_id: str):
+        """Cancel the active job for a connection if running."""
+        job = self.active_jobs.get(connection_id)
+        if job and not job.done():
+            job.cancel()
 
     async def send_message(self, connection_id: str, message: dict):
         """Send message to specific connection."""
@@ -102,6 +124,7 @@ class SimpleStatsCollector:
     def __init__(self):
         self.total_tasks = 0
         self.completed_tasks = 0
+        self.cancelled_tasks = 0
         self.total_tokens = 0
         self.total_duration_ms = 0
         self.start_times: Dict[str, float] = {}
@@ -111,10 +134,19 @@ class SimpleStatsCollector:
         self.total_tasks += 1
         self.start_times[task_id] = time.time() * 1000
 
-    def complete_task(self, task_id: str, success: bool = True, token_count: int = 0):
+    def complete_task(
+        self,
+        task_id: str,
+        success: bool = True,
+        token_count: int = 0,
+        status: Optional[str] = None,
+    ):
         import time
-        if success:
+        final_status = status or ("completed" if success else "failed")
+        if final_status == "completed":
             self.completed_tasks += 1
+        elif final_status == "cancelled":
+            self.cancelled_tasks += 1
         self.total_tokens += token_count
 
         if task_id in self.start_times:
@@ -124,7 +156,8 @@ class SimpleStatsCollector:
 
     def get_stats(self) -> Dict[str, Any]:
         avg_duration = self.total_duration_ms / max(1, self.completed_tasks)
-        success_rate = self.completed_tasks / max(1, self.total_tasks)
+        effective_total = self.total_tasks - self.cancelled_tasks
+        success_rate = self.completed_tasks / max(1, effective_total)
 
         return {
             "total_tasks": self.total_tasks,
@@ -195,14 +228,22 @@ class WebSocketProgressTracker:
             "content": normalized_content
         })
 
-    async def complete_task(self, task_id: str, success: bool = True, error: str = None,
-                          thinking: str = "", content: str = ""):
+    async def complete_task(
+        self,
+        task_id: str,
+        success: bool = True,
+        error: str = None,
+        thinking: str = "",
+        content: str = "",
+        status: Optional[str] = None,
+    ):
         """Mark task as completed."""
         if task_id not in self.tasks:
             return
 
         task = self.tasks[task_id]
-        task["status"] = "completed" if success else "failed"
+        final_status = status or ("completed" if success else "failed")
+        task["status"] = final_status
         task["progress"] = 100
         normalized_thinking = _normalize_stream_content(thinking)
         normalized_content = _normalize_stream_content(content)
@@ -215,7 +256,9 @@ class WebSocketProgressTracker:
 
         # Estimate token count from content length (rough approximation: 1 token ≈ 4 chars)
         estimated_tokens = len(task["content"]) // 4
-        self.stats_collector.complete_task(task_id, success, estimated_tokens)
+        self.stats_collector.complete_task(
+            task_id, success, estimated_tokens, status=final_status
+        )
 
         await self.manager.send_message(self.connection_id, {
             "type": "task_completed",
@@ -223,7 +266,8 @@ class WebSocketProgressTracker:
             "success": success,
             "error": error,
             "thinking": normalized_thinking,
-            "content": normalized_content
+            "content": normalized_content,
+            "status": final_status,
         })
 
     async def start_synthesis(self):
@@ -236,13 +280,20 @@ class WebSocketProgressTracker:
             "type": "synthesis_started"
         })
 
-    async def complete_synthesis(self, success: bool = True, error: str = None,
-                                thinking: str = "", content: str = ""):
+    async def complete_synthesis(
+        self,
+        success: bool = True,
+        error: str = None,
+        thinking: str = "",
+        content: str = "",
+        status: Optional[str] = None,
+    ):
         """Complete synthesis phase."""
         # Update synthesis task if it exists
         if "synthesis" in self.tasks:
             task = self.tasks["synthesis"]
-            task["status"] = "completed" if success else "failed"
+            final_status = status or ("completed" if success else "failed")
+            task["status"] = final_status
             task["progress"] = 100
             normalized_thinking = _normalize_stream_content(thinking)
             normalized_content = _normalize_stream_content(content)
@@ -255,14 +306,19 @@ class WebSocketProgressTracker:
 
             # Estimate token count for synthesis
             estimated_tokens = len(task["content"]) // 4
-            self.stats_collector.complete_task("synthesis", success, estimated_tokens)
+            self.stats_collector.complete_task(
+                "synthesis", success, estimated_tokens, status=final_status
+            )
+        else:
+            final_status = status or ("completed" if success else "failed")
 
         await self.manager.send_message(self.connection_id, {
             "type": "synthesis_completed",
             "success": success,
             "error": error,
             "thinking": self.tasks.get("synthesis", {}).get("thinking", ""),
-            "content": self.tasks.get("synthesis", {}).get("content", "")
+            "content": self.tasks.get("synthesis", {}).get("content", ""),
+            "status": final_status,
         })
 
     async def send_final_result(self, content: str, stats: Optional[Dict] = None):
@@ -278,6 +334,26 @@ class WebSocketProgressTracker:
         await self.manager.send_message(self.connection_id, {
             "type": "error",
             "message": message
+        })
+
+    async def cancel_active_tasks(self, reason: str):
+        """Mark all running tasks as cancelled."""
+        running_tasks = [
+            task_id for task_id, task in self.tasks.items() if task.get("status") == "running"
+        ]
+        for task_id in running_tasks:
+            await self.complete_task(
+                task_id,
+                success=False,
+                error=reason,
+                status="cancelled",
+            )
+
+    async def send_cancellation(self, reason: str):
+        """Notify the client that the session was cancelled."""
+        await self.manager.send_message(self.connection_id, {
+            "type": "task_cancelled",
+            "reason": reason,
         })
 
 
@@ -358,15 +434,50 @@ def create_web_app() -> FastAPI:
 
         await ws_manager.connect(websocket, connection_id)
         ws_manager.connection_tasks[connection_id] = session_id
+        current_job: Optional[asyncio.Task] = None
 
         try:
             while True:
                 # Receive message from client
                 data = await websocket.receive_text()
                 message = json.loads(data)
+                msg_type = message.get("type")
 
-                if message["type"] == "completion_request":
-                    await handle_completion_request(connection_id, session_id, message["data"])
+                if msg_type == "completion_request":
+                    if current_job and not current_job.done():
+                        await ws_manager.send_message(connection_id, {
+                            "type": "error",
+                            "message": "Previous task is still running. Please wait or cancel it."
+                        })
+                        continue
+
+                    current_job = asyncio.create_task(
+                        handle_completion_request(connection_id, session_id, message["data"]),
+                        name=f"llm-pro-session-{connection_id}",
+                    )
+                    ws_manager.set_active_job(connection_id, current_job)
+
+                    def _finalize(task: asyncio.Task):
+                        nonlocal current_job
+                        ws_manager.set_active_job(connection_id, None)
+                        current_job = None
+                        try:
+                            task.result()
+                        except CancelledError:
+                            pass
+                        except Exception as exc:  # pragma: no cover - diagnostic logging only
+                            print(f"WebSocket task error: {exc}")
+
+                    current_job.add_done_callback(_finalize)
+
+                elif msg_type == "cancel_request":
+                    if current_job and not current_job.done():
+                        ws_manager.cancel_active_job(connection_id)
+                    else:
+                        await ws_manager.send_message(connection_id, {
+                            "type": "task_cancelled",
+                            "reason": "No active task to cancel."
+                        })
 
         except WebSocketDisconnect:
             ws_manager.disconnect(connection_id)
@@ -377,36 +488,38 @@ def create_web_app() -> FastAPI:
                 "message": f"Server error: {str(e)}"
             })
             ws_manager.disconnect(connection_id)
+        finally:
+            ws_manager.cancel_active_job(connection_id)
 
     return app
 
 
 async def handle_completion_request(connection_id: str, session_id: str, request_data: dict):
     """Handle completion request with real-time progress tracking."""
+    # Create progress tracker
+    progress_tracker = WebSocketProgressTracker(ws_manager, connection_id, session_id)
+
+    # Parse request
+    prompt = request_data["prompt"]
+    n_runs = request_data.get("n_runs", 3)
+    enable_trace = request_data.get("enable_trace", False)
+    trace_compact = request_data.get("trace_compact", True)
+
+    # Create trace logger if enabled
+    trace_logger = None
+    if enable_trace:
+        trace_logger = TraceLogger(
+            enabled=True,
+            compact_mode=trace_compact,
+        )
+
     try:
-        # Create progress tracker
-        progress_tracker = WebSocketProgressTracker(ws_manager, connection_id, session_id)
-
-        # Parse request
-        prompt = request_data["prompt"]
-        n_runs = request_data.get("n_runs", 3)
-        enable_trace = request_data.get("enable_trace", False)
-        trace_compact = request_data.get("trace_compact", True)
-
-        # Create trace logger if enabled
-        trace_logger = None
-        if enable_trace:
-            trace_logger = TraceLogger(
-                enabled=True,
-                compact_mode=trace_compact,
-            )
-
         # Process with WebSocket progress tracking
         result = await process_main_with_websocket(
             prompt=prompt,
             n_runs=n_runs,
             progress_tracker=progress_tracker,
-            trace_logger=trace_logger
+            trace_logger=trace_logger,
         )
 
         # Send final result with stats
@@ -419,6 +532,10 @@ async def handle_completion_request(connection_id: str, session_id: str, request
 
         await progress_tracker.send_final_result(result or "No result generated", stats)
 
+    except CancelledError:
+        reason = "Cancelled by user"
+        await progress_tracker.cancel_active_tasks(reason)
+        await progress_tracker.send_cancellation(reason)
     except Exception as e:
         print(f"Error processing completion request: {e}")
         await ws_manager.send_message(connection_id, {
@@ -467,7 +584,12 @@ async def process_main_with_websocket(
                     trace_id,
                 )
 
-        tx.close()
+        if hasattr(tx, "aclose"):
+            with suppress(Exception):
+                await tx.aclose()
+        else:  # pragma: no cover - fallback for older anyio versions
+            with suppress(Exception):
+                tx.close()
 
         # Collect results
         candidates = []
@@ -496,6 +618,13 @@ async def process_main_with_websocket(
     except Exception as e:
         await progress_tracker.send_error(f"Processing error: {str(e)}")
         raise
+    finally:
+        if hasattr(tx, "aclose"):
+            with suppress(Exception):
+                await tx.aclose()
+        else:
+            with suppress(Exception):
+                tx.close()
 
 
 async def call_llm_with_websocket(
@@ -581,6 +710,20 @@ async def call_llm_with_websocket(
                 await tx.send(response_content)
             except Exception as tx_error:
                 print(f"[DEBUG] Error sending to tx for task {task_id}: {tx_error}")
+
+        except CancelledError:
+            print(f"[DEBUG] Task {task_id} cancelled")
+
+            if trace_logger and task_trace:
+                trace_logger.finish_task(task_trace, success=False, error_msg="Cancelled")
+
+            await progress_tracker.complete_task(
+                task_id,
+                success=False,
+                error="Cancelled by user",
+                status="cancelled",
+            )
+            raise
 
         except Exception as e:
             print(f"[DEBUG] Exception in task {task_id}: {e}")
@@ -698,6 +841,20 @@ async def synthesize_result_websocket(
         )
 
         return response_content
+
+    except CancelledError:
+        print(f"[DEBUG] Synthesis cancelled")
+        if trace_logger and task_trace:
+            trace_logger.finish_task(task_trace, success=False, error_msg="Cancelled")
+
+        await progress_tracker.complete_synthesis(
+            success=False,
+            error="Cancelled by user",
+            thinking=thinking_content,
+            content=response_content,
+            status="cancelled",
+        )
+        raise
 
     except Exception as e:
         print(f"[DEBUG] Synthesis exception: {e}")

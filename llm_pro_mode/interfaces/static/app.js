@@ -10,6 +10,7 @@ class LLMProWebApp {
         this.messageHistory = [];
         this.isConnected = false;
         this.activeModalTaskId = null;
+        this.isProcessing = false;
         this.stats = {
             totalTokens: 0,
             avgTime: 0,
@@ -62,6 +63,7 @@ class LLMProWebApp {
         this.messageInput = document.getElementById('message-input');
         this.chatForm = document.getElementById('chat-form');
         this.sendBtn = document.getElementById('send-btn');
+        this.stopBtn = document.getElementById('stop-btn');
         this.nRunsSelect = document.getElementById('n-runs');
         this.enableTraceCheckbox = document.getElementById('enable-trace');
 
@@ -140,6 +142,10 @@ class LLMProWebApp {
         // Clear chat
         this.clearBtn.addEventListener('click', () => this.clearChat());
 
+        if (this.stopBtn) {
+            this.stopBtn.addEventListener('click', () => this.handleStopRequest());
+        }
+
         // Settings form
         document.getElementById('save-settings').addEventListener('click', () => this.saveSettings());
         document.getElementById('cancel-settings').addEventListener('click', () => this.closeSettingsModal());
@@ -184,6 +190,7 @@ class LLMProWebApp {
                 this.isConnected = false;
                 this.updateConnectionStatus('disconnected', 'Disconnected');
                 this.updateMonitorStatus('Disconnected');
+                this.setProcessingState(false);
                 console.log('WebSocket disconnected');
 
                 // Attempt to reconnect after 3 seconds
@@ -193,6 +200,7 @@ class LLMProWebApp {
             this.ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
                 this.updateConnectionStatus('disconnected', 'Connection Error');
+                this.setProcessingState(false);
             };
 
         } catch (error) {
@@ -345,6 +353,9 @@ class LLMProWebApp {
             case 'synthesis_completed':
                 this.handleSynthesisCompleted(data);
                 break;
+            case 'task_cancelled':
+                this.handleTaskCancelled(data);
+                break;
             case 'error':
                 this.handleError(data);
                 break;
@@ -353,6 +364,42 @@ class LLMProWebApp {
                 break;
             default:
                 console.log('Unknown message type:', data.type);
+        }
+    }
+
+    handleStopRequest() {
+        if (!this.isConnected || !this.ws || !this.isProcessing) {
+            return;
+        }
+
+        if (this.stopBtn) {
+            this.stopBtn.disabled = true;
+            const textEl = this.stopBtn.querySelector('.btn-text');
+            if (textEl) textEl.textContent = 'Stopping...';
+            const iconEl = this.stopBtn.querySelector('.btn-icon');
+            if (iconEl) iconEl.textContent = '⏳';
+        }
+
+        if (this.sendBtn) {
+            const textEl = this.sendBtn.querySelector('.btn-text');
+            if (textEl) textEl.textContent = 'Cancelling...';
+        }
+
+        this.updateMonitorStatus('Cancelling...');
+        this.ws.send(JSON.stringify({ type: 'cancel_request' }));
+    }
+
+    setProcessingState(isProcessing) {
+        this.isProcessing = isProcessing;
+        this.setSendButtonState(!isProcessing);
+
+        if (this.stopBtn) {
+            const textEl = this.stopBtn.querySelector('.btn-text');
+            const iconEl = this.stopBtn.querySelector('.btn-icon');
+            if (textEl) textEl.textContent = 'Stop';
+            if (iconEl) iconEl.textContent = '⏹️';
+            this.stopBtn.classList.toggle('visible', isProcessing);
+            this.stopBtn.disabled = !isProcessing;
         }
     }
 
@@ -374,7 +421,7 @@ class LLMProWebApp {
 
         // Clear input and disable send button
         this.messageInput.value = '';
-        this.setSendButtonState(false);
+        this.setProcessingState(true);
 
         // Clear previous tasks
         this.clearProgressContainer();
@@ -442,7 +489,8 @@ class LLMProWebApp {
         const task = this.currentTasks.get(data.task_id);
         if (!task) return;
 
-        task.status = data.success ? 'completed' : 'failed';
+        const finalStatus = data.status || (data.success ? 'completed' : 'failed');
+        task.status = finalStatus;
         task.progress = 100;
         task.endTime = Date.now();
         task.duration = task.endTime - task.startTime;
@@ -498,7 +546,8 @@ class LLMProWebApp {
     handleSynthesisCompleted(data) {
         const task = this.currentTasks.get('synthesis');
         if (task) {
-            task.status = data.success ? 'completed' : 'failed';
+            const finalStatus = data.status || (data.success ? 'completed' : 'failed');
+            task.status = finalStatus;
             task.progress = 100;
             task.endTime = Date.now();
             task.duration = task.endTime - task.startTime;
@@ -520,15 +569,15 @@ class LLMProWebApp {
             this.refreshTaskModal(task);
         }
 
-        this.updateMonitorStatus('Completed');
+        const statusLabel = data.status === 'cancelled' ? 'Cancelled' : 'Completed';
+        this.updateMonitorStatus(statusLabel);
     }
 
     handleFinalResult(data) {
         // Add assistant message to chat
         this.addMessage('assistant', data.content);
 
-        // Re-enable send button
-        this.setSendButtonState(true);
+        this.setProcessingState(false);
 
         // Update statistics
         if (data.stats) {
@@ -536,10 +585,31 @@ class LLMProWebApp {
         }
     }
 
+    handleTaskCancelled(data) {
+        const reason = data.reason || 'Cancelled by user';
+        const hadActiveSession = this.isProcessing;
+
+        this.setProcessingState(false);
+
+        if (hadActiveSession) {
+            const message = reason === 'Cancelled by user' ? '⏹️ Task cancelled.' : `⏹️ ${reason}`;
+            this.addMessage('assistant', message);
+            this.updateMonitorStatus('Cancelled');
+        } else {
+            this.updateMonitorStatus(reason);
+        }
+
+        setTimeout(() => {
+            if (!this.isProcessing) {
+                this.updateMonitorStatus('Ready');
+            }
+        }, 2000);
+    }
+
     handleError(data) {
         console.error('Server error:', data.message);
         this.addMessage('assistant', `❌ Error: ${data.message}`);
-        this.setSendButtonState(true);
+        this.setProcessingState(false);
         this.updateMonitorStatus('Error');
     }
 
@@ -691,7 +761,8 @@ class LLMProWebApp {
         const statusMap = {
             'running': '🔄 Running',
             'completed': '✅ Completed',
-            'failed': '❌ Failed'
+            'failed': '❌ Failed',
+            'cancelled': '⏹️ Cancelled'
         };
         return statusMap[status] || status;
     }
@@ -795,14 +866,17 @@ class LLMProWebApp {
 
     updateTaskStats() {
         const completedTasks = Array.from(this.currentTasks.values()).filter(t => t.status === 'completed');
-        const failedTasks = Array.from(this.currentTasks.values()).filter(t => t.status === 'failed');
+        const cancelledTasks = Array.from(this.currentTasks.values()).filter(t => t.status === 'cancelled');
 
         this.stats.totalTasks = this.currentTasks.size;
-        this.stats.successRate = this.stats.totalTasks > 0 ?
-            (completedTasks.length / this.stats.totalTasks) * 100 : 100;
+        const denominator = this.stats.totalTasks - cancelledTasks.length;
+        this.stats.successRate = denominator > 0 ?
+            (completedTasks.length / denominator) * 100 : 0;
 
         if (completedTasks.length > 0) {
             this.stats.avgTime = completedTasks.reduce((sum, task) => sum + (task.duration || 0), 0) / completedTasks.length;
+        } else {
+            this.stats.avgTime = 0;
         }
 
         this.updateStatisticsDisplay();

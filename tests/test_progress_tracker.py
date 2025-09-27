@@ -173,7 +173,8 @@ class TestWebSocketProgressTracker:
             "success": True,
             "error": None,
             "thinking": thinking,
-            "content": content
+            "content": content,
+            "status": "completed"
         }
         mock_websocket.send_text.assert_called_once_with(json.dumps(expected_message))
 
@@ -206,9 +207,31 @@ class TestWebSocketProgressTracker:
             "success": False,
             "error": error_msg,
             "thinking": "",
-            "content": ""
+            "content": "",
+            "status": "failed"
         }
         mock_websocket.send_text.assert_called_once_with(json.dumps(expected_message))
+
+    @pytest.mark.asyncio
+    async def test_cancel_active_tasks(self, progress_tracker, websocket_manager, mock_websocket):
+        """Active running tasks should be marked as cancelled."""
+        connection_id = progress_tracker.connection_id
+        websocket_manager.active_connections[connection_id] = mock_websocket
+
+        task_id = "cancel-test"
+        await progress_tracker.start_task(task_id, "Cancelable Task")
+        mock_websocket.send_text.reset_mock()
+
+        await progress_tracker.cancel_active_tasks("Cancelled by user")
+
+        task_data = progress_tracker.tasks[task_id]
+        assert task_data["status"] == "cancelled"
+        assert task_data["error"] == "Cancelled by user"
+
+        sent_message = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert sent_message["type"] == "task_completed"
+        assert sent_message["status"] == "cancelled"
+        assert sent_message["error"] == "Cancelled by user"
 
     @pytest.mark.asyncio
     async def test_start_synthesis(self, progress_tracker, websocket_manager, mock_websocket):
@@ -259,6 +282,7 @@ class TestWebSocketProgressTracker:
             "error": None,
             "thinking": final_thinking,
             "content": final_content,
+            "status": "completed",
         }
         mock_websocket.send_text.assert_called_once_with(json.dumps(expected_message))
 
@@ -290,6 +314,7 @@ class TestWebSocketProgressTracker:
             "error": error_msg,
             "thinking": partial_thinking,
             "content": partial_content,
+            "status": "failed",
         }
         mock_websocket.send_text.assert_called_once_with(json.dumps(expected_message))
 
