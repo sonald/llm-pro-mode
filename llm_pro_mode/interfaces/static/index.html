@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Pro Mode - Web Interface</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Syntax highlighting CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <h1>LLM Pro Mode</h1>
+            <div class="header-controls">
+                <button id="settings-btn" class="icon-btn" title="Settings">⚙️</button>
+                <button id="clear-btn" class="icon-btn" title="Clear Chat">🗑️</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="app-main">
+            <!-- Chat Interface -->
+            <section class="chat-section">
+                <div class="chat-container" id="chat-container">
+                    <div class="welcome-message">
+                        <h2>🤖 Welcome to LLM Pro Mode</h2>
+                        <p>Send a message to start parallel LLM processing with real-time task monitoring.</p>
+                    </div>
+                </div>
+
+                <!-- Input Area -->
+                <div class="input-container">
+                    <form id="chat-form" class="chat-form">
+                        <textarea
+                            id="message-input"
+                            placeholder="Type your message here..."
+                            rows="3"
+                            autocomplete="off"
+                            autofocus
+                        ></textarea>
+                        <div class="form-controls">
+                            <div class="input-settings">
+                                <label>
+                                    Runs:
+                                    <select id="n-runs" name="n_runs">
+                                        <option value="3" selected>3</option>
+                                        <option value="5">5</option>
+                                        <option value="7">7</option>
+                                        <option value="10">10</option>
+                                    </select>
+                                </label>
+                                <label>
+                                    <input type="checkbox" id="enable-trace" name="enable_trace">
+                                    Enable Trace
+                                </label>
+                            </div>
+                            <button type="submit" id="send-btn" class="send-btn">
+                                <span class="btn-text">Send</span>
+                                <span class="btn-icon">📤</span>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <!-- Task Monitor Panel -->
+            <aside class="monitor-section">
+                <div class="monitor-header">
+                    <h3>🔄 Task Monitor</h3>
+                    <span class="monitor-status" id="monitor-status">Ready</span>
+                </div>
+
+                <div class="monitor-content">
+                    <!-- Progress Cards Container -->
+                    <div class="progress-container" id="progress-container">
+                        <div class="no-tasks-message">
+                            <p>No active tasks</p>
+                        </div>
+                    </div>
+
+                    <!-- Statistics Panel -->
+                    <div class="stats-panel" id="stats-panel">
+                        <h4>📊 Statistics</h4>
+                        <div class="stats-grid">
+                            <div class="stat-item">
+                                <span class="stat-label">Total Tokens:</span>
+                                <span class="stat-value" id="total-tokens">0</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Avg Time:</span>
+                                <span class="stat-value" id="avg-time">0ms</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Success Rate:</span>
+                                <span class="stat-value" id="success-rate">100%</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Total Tasks:</span>
+                                <span class="stat-value" id="total-tasks">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+        </main>
+
+        <!-- Connection Status -->
+        <div class="connection-status" id="connection-status">
+            <span class="status-indicator" id="status-indicator">●</span>
+            <span class="status-text" id="status-text">Connecting...</span>
+        </div>
+    </div>
+
+    <!-- Task Detail Modal -->
+    <div class="modal-overlay" id="task-modal-overlay">
+        <div class="modal" id="task-modal">
+            <div class="modal-header">
+                <h3 id="modal-title">Task Details</h3>
+                <button class="modal-close" id="modal-close">×</button>
+            </div>
+            <div class="modal-content">
+                <div class="modal-tabs">
+                    <button class="tab-btn active" data-tab="thinking">🤔 Thinking</button>
+                    <button class="tab-btn" data-tab="content">📝 Content</button>
+                    <button class="tab-btn" data-tab="metadata">🔍 Metadata</button>
+                </div>
+                <div class="modal-body">
+                    <div class="tab-content active" id="thinking-tab">
+                        <pre id="thinking-content"></pre>
+                    </div>
+                    <div class="tab-content" id="content-tab">
+                        <div id="content-content"></div>
+                    </div>
+                    <div class="tab-content" id="metadata-tab">
+                        <pre id="metadata-content"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settings-modal-overlay">
+        <div class="modal" id="settings-modal">
+            <div class="modal-header">
+                <h3>⚙️ Settings</h3>
+                <button class="modal-close" id="settings-close">×</button>
+            </div>
+            <div class="modal-content">
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label for="model-select">Model:</label>
+                        <input type="text" id="model-select" placeholder="Enter model name">
+                    </div>
+                    <div class="form-group">
+                        <label for="api-base">API Base:</label>
+                        <input type="url" id="api-base" placeholder="https://api.openai.com/v1">
+                    </div>
+                    <div class="form-group">
+                        <label for="api-key">API Key:</label>
+                        <input type="password" id="api-key" placeholder="sk-...">
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" id="save-settings" class="primary-btn">Save Settings</button>
+                        <button type="button" id="cancel-settings" class="secondary-btn">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Markdown rendering library -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"></script>
+    <!-- Syntax highlighting library -->
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -12,8 +12,11 @@ dependencies = [
     "pydantic",
     "rich",
     "textual",
-    "uvicorn",
+    "uvicorn[standard]",
     "pyyaml",
+    "websockets",
+    "pytest",
+    "pytest-asyncio",
 ]
 authors = [
     { name = "LLM Pro Mode Team" }
@@ -36,3 +39,10 @@ llm-pro-mode = "llm_pro_mode.main:main"
 [project.urls]
 Homepage = "https://github.com/username/llm-pro-mode"
 Repository = "https://github.com/username/llm-pro-mode.git"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
