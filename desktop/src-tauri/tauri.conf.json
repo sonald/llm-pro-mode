@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "LLM Pro Mode Desktop",
+  "version": "0.1.0",
+  "identifier": "ai.llm.pro.mode",
+  "build": {
+    "frontendDist": "../../llm_pro_mode/interfaces/static"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "LLM Pro Mode Desktop",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' data: blob: filesystem: http://127.0.0.1:* ws://127.0.0.1:* 'unsafe-inline' 'unsafe-eval';"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  }
+}

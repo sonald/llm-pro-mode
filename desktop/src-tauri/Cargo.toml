@@ -1,0 +1,18 @@
+[package]
+name = "llm-pro-mode-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Tauri shell that wraps the LLM Pro Mode web interface"
+authors = ["LLM Pro Mode Team"]
+
+[lib]
+name = "llm_pro_mode_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.8.5", features = ["wry"] }
+
+[build-dependencies]
+tauri-build = { version = "2.4.1", features = [] }

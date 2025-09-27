@@ -66,6 +66,31 @@ llm-pro-mode --web --port 8000
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## 🖥️ 桌面应用封装 (Tauri)
+
+Tauri 版本会自动启动并管理本地 FastAPI 服务, 将 Web UI 包装成原生桌面程序。
+
+### 先决条件
+- Rust (2021 edition) 与 `cargo`
+- `tauri-cli` (`cargo install tauri-cli`)
+- Python 环境可通过 `python3` 或设置 `LLM_PRO_PYTHON` 指定
+
+### 开发模式
+```bash
+cd desktop
+cargo tauri dev
+```
+运行后窗口会自动打开, 后端服务绑定 `http://127.0.0.1:<动态端口>`。
+
+### 打包发布
+```bash
+cd desktop
+cargo tauri build
+```
+构建产物位于 `desktop/src-tauri/target/release/bundle/` 下, 可用于分发。
+
+> 提示: 关闭桌面应用时, Tauri 会自动结束内置的 Python 后端进程, 无需手动清理。
+
 ## 💡 使用指南
 
 ### 基本操作
