@@ -49,12 +49,15 @@
                             <div class="input-settings">
                                 <label>
                                     Runs:
-                                    <select id="n-runs" name="n_runs">
-                                        <option value="3" selected>3</option>
-                                        <option value="5">5</option>
-                                        <option value="7">7</option>
-                                        <option value="10">10</option>
-                                    </select>
+                                    <input
+                                        type="number"
+                                        id="n-runs"
+                                        name="n_runs"
+                                        value="3"
+                                        min="1"
+                                        step="1"
+                                        inputmode="numeric"
+                                    >
                                 </label>
                                 <label>
                                     <input type="checkbox" id="enable-trace" name="enable_trace">

@@ -80,7 +80,7 @@ class LLMProWebApp {
         this.chatForm = document.getElementById('chat-form');
         this.sendBtn = document.getElementById('send-btn');
         this.stopBtn = document.getElementById('stop-btn');
-        this.nRunsSelect = document.getElementById('n-runs');
+        this.nRunsInput = document.getElementById('n-runs');
         this.enableTraceCheckbox = document.getElementById('enable-trace');
 
         // Monitor elements
@@ -425,9 +425,12 @@ class LLMProWebApp {
 
         if (!message || !this.isConnected) return;
 
+        const parsedRuns = parseInt(this.nRunsInput.value, 10);
+        const nRuns = Number.isFinite(parsedRuns) && parsedRuns > 0 ? parsedRuns : 3;
+
         const requestData = {
             prompt: message,
-            n_runs: parseInt(this.nRunsSelect.value),
+            n_runs: nRuns,
             enable_trace: this.enableTraceCheckbox.checked,
             trace_compact: true
         };
