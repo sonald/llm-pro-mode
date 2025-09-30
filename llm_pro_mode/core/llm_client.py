@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Dict, Literal, Optional, Tuple
@@ -384,6 +385,13 @@ async def call_llm(
         console.print(f"[bold red]Error calling LLM: {exc}[/]")
 
 
+TRANSIENT_STREAM_ERRORS: Tuple[type[BaseException], ...] = (
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+)
+
+
 async def call_llm_streaming(
     prompt: str,
     temperature: Optional[float] = None,
@@ -412,9 +420,27 @@ async def call_llm_streaming(
     )
     client = LLMClient()
 
-    try:
-        async for chunk in client.stream_chunks(request):
-            yield (chunk.kind, chunk.text)
-    except Exception as exc:
-        yield ("error", f"Error calling LLM: {exc}")
-        # Don't re-raise - let the caller handle the error message
+    max_attempts = 3
+    attempt = 0
+    last_error: Optional[BaseException] = None
+
+    while attempt < max_attempts:
+        attempt += 1
+        try:
+            async for chunk in client.stream_chunks(request):
+                yield (chunk.kind, chunk.text)
+            return
+        except TRANSIENT_STREAM_ERRORS as exc:
+            last_error = exc
+            if attempt >= max_attempts:
+                break
+
+            # Brief exponential backoff before retrying
+            await asyncio.sleep(0.2 * attempt)
+            continue
+        except Exception as exc:
+            yield ("error", f"Error calling LLM: {exc}")
+            return
+
+    if last_error is not None:
+        yield ("error", f"Error calling LLM: {last_error}")

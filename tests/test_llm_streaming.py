@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import Mock, AsyncMock, patch
 from typing import AsyncGenerator, Tuple
 
-from llm_pro_mode.core.llm_client import call_llm_streaming
+from llm_pro_mode.core.llm_client import LLMChunk, call_llm_streaming
 
 
 class TestLLMStreaming:
@@ -254,3 +254,36 @@ class TestLLMStreaming:
             assert len(results) == 1
             assert results[0][0] == "content"
             assert results[0][1] == "Simple response"
+
+    @pytest.mark.asyncio
+    async def test_call_llm_streaming_retries_transient_errors(self, mock_trace_logger):
+        """Transient transport errors should be retried before emitting an error chunk."""
+
+        call_counter = {"count": 0}
+
+        async def stream_chunks_side_effect(self, request):
+            call_counter["count"] += 1
+            if call_counter["count"] == 1:
+                raise BrokenPipeError("temporary failure")
+
+            yield LLMChunk(
+                kind="content",
+                text="Recovered content",
+                token_count=0,
+                thinking_count=0,
+                finish_reason="stop",
+            )
+
+        with patch('llm_pro_mode.core.llm_client.LLMClient.stream_chunks', new=stream_chunks_side_effect), \
+             patch('llm_pro_mode.core.llm_client.asyncio.sleep', new=AsyncMock(return_value=None)):
+            results = []
+            async for chunk_type, content in call_llm_streaming(
+                prompt="Test prompt",
+                temperature=0.7,
+                trace_logger=mock_trace_logger
+            ):
+                results.append((chunk_type, content))
+
+        assert call_counter["count"] == 2
+        assert results == [("content", "Recovered content")]
+

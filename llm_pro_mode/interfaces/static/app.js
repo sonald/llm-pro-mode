@@ -16,6 +16,9 @@ const MATH_RENDER_OPTIONS = {
     },
 };
 
+// KaTeX commands we should render even when no delimiters are present
+const BARE_KATEX_COMMANDS = new Set(['\\boxed']);
+
 class LLMProWebApp {
     constructor() {
         this.ws = null;
@@ -671,7 +674,9 @@ class LLMProWebApp {
             // Use marked.js for comprehensive markdown rendering
             if (typeof marked !== 'undefined') {
                 console.log('Using marked.js to render markdown');
-                let html = marked.parse(content);
+                const { escaped, placeholders } = this.escapeMathDelimiters(content);
+                let html = marked.parse(escaped);
+                html = this.restoreMathDelimiters(html, placeholders);
                 console.log('marked.js rendered HTML:', html ? html.substring(0, 200) + '...' : 'empty');
 
                 const temp = document.createElement('div');
@@ -706,6 +711,45 @@ class LLMProWebApp {
             console.log('Error fallback content:', escapedContent.substring(0, 200) + '...');
             return escapedContent;
         }
+    }
+
+    escapeMathDelimiters(content) {
+        if (typeof content !== 'string' || content.length === 0) {
+            return { escaped: content, placeholders: [] };
+        }
+
+        const delimiters = [
+            { token: '%%KATEX_BLOCK_OPEN%%', pattern: /\\\[/g, original: '\\[' },
+            { token: '%%KATEX_BLOCK_CLOSE%%', pattern: /\\\]/g, original: '\\]' },
+            { token: '%%KATEX_INLINE_OPEN%%', pattern: /\\\(/g, original: '\\(' },
+            { token: '%%KATEX_INLINE_CLOSE%%', pattern: /\\\)/g, original: '\\)' },
+        ];
+
+        let escaped = content;
+        const placeholders = [];
+
+        delimiters.forEach(({ token, pattern, original }) => {
+            const replaced = escaped.replace(pattern, token);
+            if (replaced !== escaped) {
+                placeholders.push({ token, original });
+                escaped = replaced;
+            }
+        });
+
+        return { escaped, placeholders };
+    }
+
+    restoreMathDelimiters(html, placeholders) {
+        if (!Array.isArray(placeholders) || placeholders.length === 0 || typeof html !== 'string') {
+            return html;
+        }
+
+        let restored = html;
+        placeholders.forEach(({ token, original }) => {
+            restored = restored.split(token).join(original);
+        });
+
+        return restored;
     }
 
     applyMathRendering(targetEl) {
@@ -771,7 +815,9 @@ class LLMProWebApp {
             }
         }
 
-        if (!autoRenderSucceeded && typeof katex !== 'undefined') {
+        const hasBareMath = this.containsBareMathCommand(rootElement.textContent || '');
+
+        if (typeof katex !== 'undefined' && (!autoRenderSucceeded || hasBareMath)) {
             this.applyKatexManually(rootElement);
         }
     }
@@ -782,7 +828,14 @@ class LLMProWebApp {
             NodeFilter.SHOW_TEXT,
             {
                 acceptNode: (node) => {
-                    if (!node || !node.nodeValue || !node.nodeValue.includes('$')) {
+                    const value = node && node.nodeValue;
+                    if (!value) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    const hasMathDelimiter = value.includes('$');
+                    const hasBareCommand = !hasMathDelimiter && this.containsBareMathCommand(value);
+                    if (!hasMathDelimiter && !hasBareCommand) {
                         return NodeFilter.FILTER_REJECT;
                     }
 
@@ -852,7 +905,7 @@ class LLMProWebApp {
     }
 
     splitMathSegments(textContent) {
-        if (!textContent || !textContent.includes('$')) {
+        if (!textContent) {
             return null;
         }
 
@@ -860,7 +913,7 @@ class LLMProWebApp {
         const segments = [];
         let lastIndex = 0;
         let match;
-        let hasMath = false;
+        let hasDelimitedMath = false;
 
         while ((match = pattern.exec(textContent)) !== null) {
             const matchStart = match.index;
@@ -893,7 +946,7 @@ class LLMProWebApp {
                 value: expression.trim(),
                 display,
             });
-            hasMath = true;
+            hasDelimitedMath = true;
 
             lastIndex = matchStart + raw.length;
         }
@@ -905,7 +958,148 @@ class LLMProWebApp {
             });
         }
 
-        return hasMath ? segments : null;
+        let hasAnyMath = hasDelimitedMath;
+        const expandedSegments = [];
+
+        segments.forEach((segment) => {
+            if (segment.type !== 'text') {
+                expandedSegments.push(segment);
+                return;
+            }
+
+            const bareSplit = this.splitBareMathFromText(segment.value);
+            if (!bareSplit) {
+                expandedSegments.push(segment);
+                return;
+            }
+
+            hasAnyMath = true;
+            bareSplit.forEach((part) => expandedSegments.push(part));
+        });
+
+        return hasAnyMath ? expandedSegments : null;
+    }
+
+    splitBareMathFromText(text) {
+        if (!text || !text.includes('\\')) {
+            return null;
+        }
+
+        const segments = [];
+        let index = 0;
+        let hasMath = false;
+
+        while (index < text.length) {
+            const match = this.findBareMathCommand(text, index);
+            if (!match) {
+                break;
+            }
+
+            if (match.start > index) {
+                segments.push({
+                    type: 'text',
+                    value: text.slice(index, match.start),
+                });
+            }
+
+            segments.push({
+                type: 'math',
+                value: match.expression.trim(),
+                display: false,
+            });
+            hasMath = true;
+            index = match.end;
+        }
+
+        if (!hasMath) {
+            return null;
+        }
+
+        if (index < text.length) {
+            segments.push({
+                type: 'text',
+                value: text.slice(index),
+            });
+        }
+
+        return segments;
+    }
+
+    findBareMathCommand(text, fromIndex = 0) {
+        const whitespace = /\s/;
+        let searchIndex = fromIndex;
+
+        while (searchIndex < text.length) {
+            const slashIndex = text.indexOf('\\', searchIndex);
+            if (slashIndex === -1) {
+                return null;
+            }
+
+            if (slashIndex > 0 && text[slashIndex - 1] === '\\') {
+                searchIndex = slashIndex + 1;
+                continue;
+            }
+
+            const commandMatch = text.slice(slashIndex).match(/^\\[a-zA-Z]+/);
+            if (!commandMatch) {
+                searchIndex = slashIndex + 1;
+                continue;
+            }
+
+            const command = commandMatch[0];
+            if (!BARE_KATEX_COMMANDS.has(command)) {
+                searchIndex = slashIndex + command.length;
+                continue;
+            }
+
+            let pos = slashIndex + command.length;
+            while (pos < text.length && whitespace.test(text[pos])) {
+                pos += 1;
+            }
+
+            if (pos >= text.length || text[pos] !== '{') {
+                searchIndex = slashIndex + command.length;
+                continue;
+            }
+
+            let depth = 0;
+            let end = pos;
+
+            while (end < text.length) {
+                const char = text[end];
+                if (char === '{') {
+                    depth += 1;
+                } else if (char === '}') {
+                    depth -= 1;
+                    if (depth === 0) {
+                        end += 1;
+                        break;
+                    }
+                }
+                end += 1;
+            }
+
+            if (depth !== 0) {
+                searchIndex = slashIndex + 1;
+                continue;
+            }
+
+            return {
+                start: slashIndex,
+                end,
+                expression: text.slice(slashIndex, end),
+            };
+        }
+
+        return null;
+    }
+
+    containsBareMathCommand(text) {
+        if (!text || !text.includes('\\')) {
+            return false;
+        }
+
+        return this.findBareMathCommand(text) !== null;
     }
 
     clearProgressContainer() {
