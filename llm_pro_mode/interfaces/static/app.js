@@ -624,12 +624,8 @@ class LLMProWebApp {
         const bubble = document.createElement('div');
         bubble.className = 'message-bubble';
 
-        if (role === 'assistant') {
-            // Render markdown for assistant messages
-            bubble.innerHTML = this.renderMarkdown(content);
-        } else {
-            bubble.textContent = content;
-        }
+        // Render markdown for all messages so users can preview formatted input
+        bubble.innerHTML = this.renderMarkdown(content);
 
         messageEl.appendChild(avatar);
         messageEl.appendChild(bubble);
@@ -642,6 +638,11 @@ class LLMProWebApp {
 
         this.chatContainer.appendChild(messageEl);
         this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
+
+        // If math wasn't processed during markdown rendering, attempt deferred rendering
+        if (!bubble.innerHTML.includes('katex')) {
+            this.deferMathRendering(bubble);
+        }
 
         // Store in history
         this.messageHistory.push({ role, content, timestamp: Date.now() });
@@ -659,8 +660,30 @@ class LLMProWebApp {
             // Use marked.js for comprehensive markdown rendering
             if (typeof marked !== 'undefined') {
                 console.log('Using marked.js to render markdown');
-                const html = marked.parse(content);
+                let html = marked.parse(content);
                 console.log('marked.js rendered HTML:', html ? html.substring(0, 200) + '...' : 'empty');
+
+                if (typeof renderMathInElement === 'function') {
+                    const temp = document.createElement('div');
+                    temp.innerHTML = html;
+                    try {
+            renderMathInElement(temp, {
+                delimiters: [
+                    { left: '$$', right: '$$', display: true },
+                    { left: '\\[', right: '\\]', display: true },
+                    { left: '\\(', right: '\\)', display: false },
+                    { left: '$', right: '$', display: false }
+                ],
+                throwOnError: false,
+                macros: {
+                    '\\box': '\\boxed'
+                }
+            });
+                        html = temp.innerHTML;
+                    } catch (mathError) {
+                        console.error('Error parsing math with KaTeX:', mathError);
+                    }
+                }
 
                 // Add syntax highlighting to code blocks after rendering
                 setTimeout(() => {
@@ -688,6 +711,63 @@ class LLMProWebApp {
             const escapedContent = content.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
             console.log('Error fallback content:', escapedContent.substring(0, 200) + '...');
             return escapedContent;
+        }
+    }
+
+    applyMathRendering(targetEl) {
+        if (!targetEl) {
+            return;
+        }
+
+        if (typeof renderMathInElement !== 'function') {
+            return;
+        }
+
+        try {
+            renderMathInElement(targetEl, {
+                delimiters: [
+                    { left: '$$', right: '$$', display: true },
+                    { left: '\\[', right: '\\]', display: true },
+                    { left: '\\(', right: '\\)', display: false },
+                    { left: '$', right: '$', display: false }
+                ],
+                throwOnError: false,
+                macros: {
+                    '\\box': '\\boxed'
+                }
+            });
+        } catch (error) {
+            console.error('Error rendering math expressions:', error);
+        }
+    }
+
+    deferMathRendering(targetEl) {
+        if (!targetEl) {
+            return;
+        }
+
+        const render = () => {
+            this.applyMathRendering(targetEl);
+            // Also refresh the chat container to cover previously rendered nodes
+            if (this.chatContainer) {
+                this.applyMathRendering(this.chatContainer);
+            }
+        };
+
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(render);
+        } else {
+            setTimeout(render, 0);
+        }
+
+        if (typeof renderMathInElement !== 'function') {
+            const retries = Number(targetEl.dataset.mathRetries || '0');
+            if (retries < 5) {
+                targetEl.dataset.mathRetries = String(retries + 1);
+                setTimeout(() => this.deferMathRendering(targetEl), 250 * (retries + 1));
+            }
+        } else {
+            delete targetEl.dataset.mathRetries;
         }
     }
 
@@ -803,6 +883,9 @@ class LLMProWebApp {
 
         const contentHtml = task.content ? this.renderMarkdown(task.content) : '';
         this.contentContent.innerHTML = contentHtml || '<p>No content available</p>';
+        if (!this.contentContent.innerHTML.includes('katex')) {
+            this.deferMathRendering(this.contentContent);
+        }
 
         const metadataText = task.metadata && Object.keys(task.metadata).length > 0
             ? JSON.stringify(task.metadata, null, 2)
