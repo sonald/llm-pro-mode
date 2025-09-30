@@ -190,8 +190,16 @@ class TestWebUIIntegration:
             await ws_manager.connect(mock_websocket, connection_id)
             ws_manager.connection_tasks[connection_id] = session_id
 
-            async def mock_call_llm_streaming(prompt, temperature=0.7, max_tokens=None, trace_logger=None, trace_id=None):
-                if prompt.startswith("System: "):
+            async def mock_call_llm_streaming(
+                prompt,
+                temperature=None,
+                max_tokens=None,
+                system=None,
+                trace_logger=None,
+                trace_id=None,
+                metadata=None,
+            ):
+                if system:
                     yield ("thinking", [{"type": "text", "text": "Combining candidates"}])
                     yield ("content", "Final synthesized answer")
                 else:

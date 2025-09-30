@@ -7,7 +7,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from .llm_client import call_llm, call_llm_tui
 from .synthesizer import synthesize_result, synthesize_result_tui
-from ..config import console
+from ..config import config, console
 from ..tracing.logger import TraceLogger
 
 
@@ -57,7 +57,7 @@ async def main(
                             call_llm,
                             prompt,
                             tx.clone(),
-                            0.9,
+                            config.temperature,
                             None,
                             progress,
                             task_id,
@@ -69,7 +69,7 @@ async def main(
                             call_llm_tui,
                             prompt,
                             tx.clone(),
-                            0.9,
+                            config.temperature,
                             None,
                             tui_app,
                             f"Run {i + 1}",
@@ -81,7 +81,7 @@ async def main(
                             call_llm,
                             prompt,
                             tx.clone(),
-                            0.9,
+                            config.temperature,
                             None,
                             None,
                             None,

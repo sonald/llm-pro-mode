@@ -161,13 +161,13 @@ class TestSynthesis:
         connection_id = progress_tracker.connection_id
         websocket_manager.active_connections[connection_id] = mock_websocket
 
-        # Track the prompt sent to API
-        captured_prompt = None
+        # Track the messages sent to API
+        captured_messages = None
 
         async def mock_acompletion(*args, **kwargs):
-            nonlocal captured_prompt
-            # Capture the messages parameter which contains the prompt
-            captured_prompt = kwargs.get('messages', [{}])[-1].get('content', '')
+            nonlocal captured_messages
+            # Capture the messages parameter which contains system/user prompts
+            captured_messages = kwargs.get('messages', [])
 
             async def generator():
                 mock_chunks = [Mock(choices=[Mock(delta=Mock(
@@ -186,15 +186,18 @@ class TestSynthesis:
             )
 
             # Verify prompt contains system message and candidates
-            assert captured_prompt is not None
-            assert "expert editor" in captured_prompt.lower()
-            assert "synthesize" in captured_prompt.lower()
-            assert "<cand0>" in captured_prompt
-            assert "<cand1>" in captured_prompt
-            assert "<cand2>" in captured_prompt
-            assert mock_synthesis_candidates[0] in captured_prompt
-            assert mock_synthesis_candidates[1] in captured_prompt
-            assert mock_synthesis_candidates[2] in captured_prompt
+            assert captured_messages is not None
+            assert captured_messages[0]["role"] == "system"
+            assert "expert editor" in captured_messages[0]["content"].lower()
+
+            user_message = captured_messages[-1]["content"]
+            assert "return the single best final answer" in user_message.lower()
+            assert "<cand0>" in user_message
+            assert "<cand1>" in user_message
+            assert "<cand2>" in user_message
+            assert mock_synthesis_candidates[0] in user_message
+            assert mock_synthesis_candidates[1] in user_message
+            assert mock_synthesis_candidates[2] in user_message
 
     @pytest.mark.asyncio
     async def test_synthesize_result_websocket_with_trace_integration(self, mock_synthesis_candidates,

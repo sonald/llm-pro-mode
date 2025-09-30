@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from .yaml_dumper import CustomYAMLDumper
+from litellm import token_counter
 
 
 class TraceLogger:
@@ -80,7 +81,9 @@ class TraceLogger:
             return
 
         task_trace["thinking"] += thinking_content
-        task_trace["output"]["thinking_tokens"] += len(thinking_content)
+        task_trace["output"]["thinking_tokens"] += _count_tokens(
+            thinking_content, task_trace.get("model")
+        )
 
     def log_content(self, task_trace: Dict[str, Any], content: str):
         """Log output content."""
@@ -88,7 +91,9 @@ class TraceLogger:
             return
 
         task_trace["content"] += content
-        task_trace["output"]["content_tokens"] += len(content)
+        task_trace["output"]["content_tokens"] += _count_tokens(
+            content, task_trace.get("model")
+        )
 
     def finish_task(
         self,
@@ -227,3 +232,15 @@ class TraceLogger:
             "avg_duration_ms": avg_duration,
             "mode": "compact" if self.compact_mode else "full",
         }
+
+
+def _count_tokens(text: str, model_name: Optional[str]) -> int:
+    """Count tokens with graceful fallback when tokenizer is unavailable."""
+    if not text:
+        return 0
+
+    model = model_name or "gpt-3.5-turbo"
+    try:
+        return int(token_counter(model=model, text=text))
+    except Exception:
+        return max(1, len(text) // 4)

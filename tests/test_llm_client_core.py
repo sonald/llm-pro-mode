@@ -5,11 +5,14 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from litellm import token_counter
+
 from llm_pro_mode.core.llm_client import (
     LLMClient,
     LLMRequest,
     _normalize_reasoning_payload,
 )
+from llm_pro_mode.config import config
 
 
 @pytest.mark.asyncio
@@ -56,11 +59,16 @@ async def test_stream_chunks_normalizes_reasoning_payload(mock_trace_logger):
         chunks.append(chunk)
 
     assert [chunk.kind for chunk in chunks] == ["thinking", "content"]
+    expected_model = config.model_name or "gpt-3.5-turbo"
     assert chunks[0].text == "FirstSecond"
-    assert chunks[0].thinking_count == len("FirstSecond")
+    assert chunks[0].thinking_count == token_counter(
+        model=expected_model, text="FirstSecond"
+    )
     assert chunks[0].token_count == 0
     assert chunks[1].text == "Hello"
-    assert chunks[1].token_count == len("Hello")
+    assert chunks[1].token_count == token_counter(
+        model=expected_model, text="Hello"
+    )
     assert chunks[1].finish_reason == "stop"
 
     mock_trace_logger.log_thinking.assert_called_once_with("mock-trace-id", "FirstSecond")
@@ -116,9 +124,14 @@ async def test_gather_result_accumulates_text_and_counts():
     request = LLMRequest(prompt="Test prompt")
     result = await client.gather_result(request)
 
+    expected_model = config.model_name or "gpt-3.5-turbo"
     assert result.content == "Hello World"
-    assert result.token_count == len("Hello World")
-    assert result.thinking_count == len("Thinking")
+    assert result.token_count == token_counter(
+        model=expected_model, text="Hello World"
+    )
+    assert result.thinking_count == token_counter(
+        model=expected_model, text="Thinking"
+    )
     assert result.finish_reason == "stop"
 
 

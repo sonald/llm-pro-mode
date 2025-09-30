@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Dict, Literal, Optional, Tuple
 
 from anyio.streams.memory import MemoryObjectSendStream
-from litellm import acompletion
+from litellm import acompletion, token_counter
 from rich.progress import Progress, TaskID
 
 from ..config import config, console
@@ -146,7 +146,7 @@ class LLMClient:
                 if reasoning_payload is not None:
                     normalized_reasoning = _normalize_reasoning_payload(reasoning_payload)
                     if normalized_reasoning:
-                        thinking_count += len(normalized_reasoning)
+                        thinking_count += _count_tokens(normalized_reasoning)
                         trace.log_thinking(normalized_reasoning)
                         yield LLMChunk(
                             kind="thinking",
@@ -157,7 +157,7 @@ class LLMClient:
                         )
 
                 if hasattr(delta, "content") and delta.content:
-                    token_count += len(delta.content)
+                    token_count += _count_tokens(delta.content)
                     trace.log_content(delta.content)
                     yield LLMChunk(
                         kind="content",
@@ -220,10 +220,30 @@ def _normalize_reasoning_payload(value: Any) -> str:
     return str(value)
 
 
+def _resolve_temperature(value: Optional[float]) -> float:
+    """Return effective sampling temperature with global fallback."""
+    if value is not None:
+        return value
+    return config.temperature
+
+
+def _count_tokens(text: str) -> int:
+    """Count tokens for the provided text with graceful fallback."""
+    if not text:
+        return 0
+
+    model_name = config.model_name or "gpt-3.5-turbo"
+    try:
+        return int(token_counter(model=model_name, text=text))
+    except Exception:
+        # Fall back to an approximate character-based heuristic when token counting fails.
+        return max(1, len(text) // 4)
+
+
 async def call_llm_tui(
     prompt: str,
     tx: MemoryObjectSendStream,
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     system: Optional[str] = None,
     tui_app=None,
     task_name: str = "Task",
@@ -231,10 +251,13 @@ async def call_llm_tui(
     trace_id: Optional[str] = None,
 ):
     """Call LLM with TUI integration for progress updates."""
+    max_token_limit = config.max_tokens if config.max_tokens is not None else None
+
     request = LLMRequest(
         prompt=prompt,
         system=system,
-        temperature=temperature,
+        temperature=_resolve_temperature(temperature),
+        max_tokens=max_token_limit,
         trace_logger=trace_logger,
         trace_id=trace_id,
     )
@@ -289,7 +312,7 @@ async def call_llm_tui(
 async def call_llm(
     prompt: str,
     tx: MemoryObjectSendStream,
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     system: Optional[str] = None,
     progress: Optional[Progress] = None,
     task_id: Optional[TaskID] = None,
@@ -297,10 +320,13 @@ async def call_llm(
     trace_id: Optional[str] = None,
 ):
     """Call LLM with progress bar integration."""
+    max_token_limit = config.max_tokens if config.max_tokens is not None else None
+
     request = LLMRequest(
         prompt=prompt,
         system=system,
-        temperature=temperature,
+        temperature=_resolve_temperature(temperature),
+        max_tokens=max_token_limit,
         trace_logger=trace_logger,
         trace_id=trace_id,
     )
@@ -360,10 +386,12 @@ async def call_llm(
 
 async def call_llm_streaming(
     prompt: str,
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
+    system: Optional[str] = None,
     trace_logger: Optional[TraceLogger] = None,
     trace_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> AsyncGenerator[Tuple[str, str], None]:
     """
     Call LLM with streaming support for WebSocket integration.
@@ -371,12 +399,16 @@ async def call_llm_streaming(
     Yields:
         Tuple[str, str]: (chunk_type, content) where chunk_type is 'thinking' or 'content'
     """
+    effective_max_tokens = max_tokens if max_tokens is not None else config.max_tokens
+
     request = LLMRequest(
         prompt=prompt,
-        temperature=temperature,
-        max_tokens=max_tokens,
+        system=system,
+        temperature=_resolve_temperature(temperature),
+        max_tokens=effective_max_tokens,
         trace_logger=trace_logger,
         trace_id=trace_id,
+        metadata=metadata or {},
     )
     client = LLMClient()
 

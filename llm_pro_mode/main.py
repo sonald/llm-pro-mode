@@ -155,6 +155,23 @@ API Key 环境变量引用 (Environment Variable Reference):
     exec_group.add_argument(
         "--n_runs", "-n", type=int, default=3, help="并行运行次数 (默认: 3)"
     )
+    exec_group.add_argument(
+        "--temperature",
+        type=float,
+        help="主任务采样温度 (默认: 0.9)",
+    )
+    exec_group.add_argument(
+        "--synthesis-temperature",
+        dest="synthesis_temperature",
+        type=float,
+        help="合成阶段采样温度 (默认: 0.2)",
+    )
+    exec_group.add_argument(
+        "--max-tokens",
+        dest="max_tokens",
+        type=int,
+        help="LLM 响应 token 上限 (默认: 不限制)",
+    )
 
     # Interface mode selection
     mode_group = parser.add_argument_group("界面模式 (Interface Modes)")

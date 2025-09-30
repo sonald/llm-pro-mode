@@ -23,6 +23,9 @@ class Config:
     trace_enabled: bool = False
     trace_dir: str = "traces"
     trace_compact: bool = False
+    temperature: float = 0.9
+    synthesis_temperature: float = 0.2
+    max_tokens: Optional[int] = None
 
     # Profile-related settings
     profile_name: Optional[str] = None
@@ -106,6 +109,21 @@ class Config:
             env_api_key = os.getenv("LLM_PRO_API_KEY")
             if env_api_key:
                 self.api_key = self._resolve_api_key(env_api_key)
+        if os.getenv("LLM_PRO_TEMPERATURE"):
+            try:
+                self.temperature = float(os.getenv("LLM_PRO_TEMPERATURE"))
+            except ValueError:
+                console.print("[yellow]警告：LLM_PRO_TEMPERATURE 非法，使用默认值[/yellow]")
+        if os.getenv("LLM_PRO_SYNTH_TEMPERATURE"):
+            try:
+                self.synthesis_temperature = float(os.getenv("LLM_PRO_SYNTH_TEMPERATURE"))
+            except ValueError:
+                console.print("[yellow]警告：LLM_PRO_SYNTH_TEMPERATURE 非法，使用默认值[/yellow]")
+        if os.getenv("LLM_PRO_MAX_TOKENS"):
+            try:
+                self.max_tokens = int(os.getenv("LLM_PRO_MAX_TOKENS"))
+            except ValueError:
+                console.print("[yellow]警告：LLM_PRO_MAX_TOKENS 非法，忽略该配置[/yellow]")
 
     def update_from_args(self, args) -> None:
         """Update configuration from command line arguments."""
@@ -135,6 +153,12 @@ class Config:
             self.trace_dir = args.trace_dir
         if hasattr(args, 'trace_compact') and args.trace_compact:
             self.trace_compact = args.trace_compact
+        if hasattr(args, 'temperature') and args.temperature is not None:
+            self.temperature = args.temperature
+        if hasattr(args, 'synthesis_temperature') and args.synthesis_temperature is not None:
+            self.synthesis_temperature = args.synthesis_temperature
+        if hasattr(args, 'max_tokens') and args.max_tokens is not None:
+            self.max_tokens = args.max_tokens
 
         # Reload configuration after args update to apply profile changes
         if hasattr(args, 'profile') or hasattr(args, 'config'):
@@ -241,6 +265,9 @@ class Config:
         if self.api_key:
             api_key_status += f" ({self.api_key[:8]}...)"
         summary.append(f"API Key: {api_key_status}")
+        summary.append(f"Temperature: {self.temperature}")
+        summary.append(f"Synthesis Temp: {self.synthesis_temperature}")
+        summary.append(f"Max Tokens: {self.max_tokens or 'Unlimited'}")
 
         return " | ".join(summary)
 

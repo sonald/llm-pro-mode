@@ -5,6 +5,7 @@ import anyio
 from rich.progress import Progress, TaskID
 
 from .llm_client import call_llm, call_llm_tui
+from ..config import config
 from ..tracing.logger import TraceLogger
 
 
@@ -43,7 +44,7 @@ async def synthesize_result(
             call_llm,
             user,
             tx,
-            0.2,
+            config.synthesis_temperature,
             system,
             progress,
             task_id,
@@ -89,7 +90,7 @@ async def synthesize_result_tui(
             call_llm_tui,
             user,
             tx,
-            0.2,
+            config.synthesis_temperature,
             system,
             tui_app,
             "Synthesis",

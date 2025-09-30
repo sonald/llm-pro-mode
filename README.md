@@ -33,7 +33,16 @@ export LLM_PRO_PYTHON="$HOME/.pyenv/versions/3.11.7/bin/python"
 ```bash
 llm-pro-mode --prompt "写一个快速排序" --model "gpt-4"
 llm-pro-mode -p "分析这段代码" -m "claude-3-sonnet" -n 5
+llm-pro-mode -p "总结需求" --temperature 0.6 --max-tokens 800
 llm-pro-mode -p - < input.txt           # 从 stdin 读取
+```
+
+可使用 `--temperature` / `--synthesis-temperature` / `--max-tokens` 细化采样策略，也可以通过环境变量持久化：
+
+```bash
+export LLM_PRO_TEMPERATURE=0.8
+export LLM_PRO_SYNTH_TEMPERATURE=0.3
+export LLM_PRO_MAX_TOKENS=1200
 ```
 
 ### 2. TUI 模式

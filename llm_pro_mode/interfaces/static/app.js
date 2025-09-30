@@ -3,6 +3,19 @@
  * Handles WebSocket communication, UI updates, and task monitoring
  */
 
+const MATH_RENDER_OPTIONS = {
+    delimiters: [
+        { left: '$$', right: '$$', display: true },
+        { left: '\\[', right: '\\]', display: true },
+        { left: '\\(', right: '\\)', display: false },
+        { left: '$', right: '$', display: false },
+    ],
+    throwOnError: false,
+    macros: {
+        '\\box': '\\boxed'
+    },
+};
+
 class LLMProWebApp {
     constructor() {
         this.ws = null;
@@ -640,9 +653,7 @@ class LLMProWebApp {
         this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
 
         // If math wasn't processed during markdown rendering, attempt deferred rendering
-        if (!bubble.innerHTML.includes('katex')) {
-            this.deferMathRendering(bubble);
-        }
+        this.deferMathRendering(bubble);
 
         // Store in history
         this.messageHistory.push({ role, content, timestamp: Date.now() });
@@ -663,27 +674,10 @@ class LLMProWebApp {
                 let html = marked.parse(content);
                 console.log('marked.js rendered HTML:', html ? html.substring(0, 200) + '...' : 'empty');
 
-                if (typeof renderMathInElement === 'function') {
-                    const temp = document.createElement('div');
-                    temp.innerHTML = html;
-                    try {
-            renderMathInElement(temp, {
-                delimiters: [
-                    { left: '$$', right: '$$', display: true },
-                    { left: '\\[', right: '\\]', display: true },
-                    { left: '\\(', right: '\\)', display: false },
-                    { left: '$', right: '$', display: false }
-                ],
-                throwOnError: false,
-                macros: {
-                    '\\box': '\\boxed'
-                }
-            });
-                        html = temp.innerHTML;
-                    } catch (mathError) {
-                        console.error('Error parsing math with KaTeX:', mathError);
-                    }
-                }
+                const temp = document.createElement('div');
+                temp.innerHTML = html;
+                this.processMathExpressions(temp);
+                html = temp.innerHTML;
 
                 // Add syntax highlighting to code blocks after rendering
                 setTimeout(() => {
@@ -719,23 +713,8 @@ class LLMProWebApp {
             return;
         }
 
-        if (typeof renderMathInElement !== 'function') {
-            return;
-        }
-
         try {
-            renderMathInElement(targetEl, {
-                delimiters: [
-                    { left: '$$', right: '$$', display: true },
-                    { left: '\\[', right: '\\]', display: true },
-                    { left: '\\(', right: '\\)', display: false },
-                    { left: '$', right: '$', display: false }
-                ],
-                throwOnError: false,
-                macros: {
-                    '\\box': '\\boxed'
-                }
-            });
+            this.processMathExpressions(targetEl);
         } catch (error) {
             console.error('Error rendering math expressions:', error);
         }
@@ -748,7 +727,6 @@ class LLMProWebApp {
 
         const render = () => {
             this.applyMathRendering(targetEl);
-            // Also refresh the chat container to cover previously rendered nodes
             if (this.chatContainer) {
                 this.applyMathRendering(this.chatContainer);
             }
@@ -760,15 +738,174 @@ class LLMProWebApp {
             setTimeout(render, 0);
         }
 
-        if (typeof renderMathInElement !== 'function') {
+        if (!this.isMathRendererReady()) {
             const retries = Number(targetEl.dataset.mathRetries || '0');
             if (retries < 5) {
                 targetEl.dataset.mathRetries = String(retries + 1);
                 setTimeout(() => this.deferMathRendering(targetEl), 250 * (retries + 1));
+            } else {
+                console.warn('Math rendering library not ready after retries');
             }
         } else {
             delete targetEl.dataset.mathRetries;
         }
+    }
+
+    isMathRendererReady() {
+        return typeof renderMathInElement === 'function' || typeof katex !== 'undefined';
+    }
+
+    processMathExpressions(rootElement) {
+        if (!rootElement) {
+            return;
+        }
+
+        let autoRenderSucceeded = false;
+
+        if (typeof renderMathInElement === 'function') {
+            try {
+                renderMathInElement(rootElement, MATH_RENDER_OPTIONS);
+                autoRenderSucceeded = true;
+            } catch (error) {
+                console.error('KaTeX auto-render error:', error);
+            }
+        }
+
+        if (!autoRenderSucceeded && typeof katex !== 'undefined') {
+            this.applyKatexManually(rootElement);
+        }
+    }
+
+    applyKatexManually(rootElement) {
+        const walker = document.createTreeWalker(
+            rootElement,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode: (node) => {
+                    if (!node || !node.nodeValue || !node.nodeValue.includes('$')) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    const parent = node.parentNode;
+                    if (!parent) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    const tagName = parent.nodeName.toLowerCase();
+                    if ([
+                        'script',
+                        'style',
+                        'textarea',
+                        'code',
+                        'pre',
+                    ].includes(tagName)) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    if (parent.classList && parent.classList.contains('katex')) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    return NodeFilter.FILTER_ACCEPT;
+                },
+            }
+        );
+
+        const textNodes = [];
+        let current;
+        while ((current = walker.nextNode())) {
+            textNodes.push(current);
+        }
+
+        textNodes.forEach((textNode) => {
+            const segments = this.splitMathSegments(textNode.nodeValue);
+            if (!segments) {
+                return;
+            }
+
+            const fragment = document.createDocumentFragment();
+
+            segments.forEach((segment) => {
+                if (segment.type === 'text') {
+                    fragment.appendChild(document.createTextNode(segment.value));
+                    return;
+                }
+
+                const container = document.createElement(segment.display ? 'div' : 'span');
+                container.classList.add('math-expression');
+
+                try {
+                    katex.render(segment.value, container, {
+                        displayMode: segment.display,
+                        throwOnError: false,
+                    });
+                } catch (error) {
+                    console.error('KaTeX manual render error:', error);
+                    container.textContent = segment.value;
+                }
+
+                fragment.appendChild(container);
+            });
+
+            textNode.parentNode.replaceChild(fragment, textNode);
+        });
+    }
+
+    splitMathSegments(textContent) {
+        if (!textContent || !textContent.includes('$')) {
+            return null;
+        }
+
+        const pattern = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$(?:[^$\\]|\\.)+?\$)/g;
+        const segments = [];
+        let lastIndex = 0;
+        let match;
+        let hasMath = false;
+
+        while ((match = pattern.exec(textContent)) !== null) {
+            const matchStart = match.index;
+
+            if (matchStart > lastIndex) {
+                segments.push({
+                    type: 'text',
+                    value: textContent.slice(lastIndex, matchStart),
+                });
+            }
+
+            const raw = match[0];
+            let display = false;
+            let expression = raw;
+
+            if (raw.startsWith('$$')) {
+                display = true;
+                expression = raw.slice(2, -2);
+            } else if (raw.startsWith('\\[')) {
+                display = true;
+                expression = raw.slice(2, -2);
+            } else if (raw.startsWith('\\(')) {
+                expression = raw.slice(2, -2);
+            } else {
+                expression = raw.slice(1, -1);
+            }
+
+            segments.push({
+                type: 'math',
+                value: expression.trim(),
+                display,
+            });
+            hasMath = true;
+
+            lastIndex = matchStart + raw.length;
+        }
+
+        if (lastIndex < textContent.length) {
+            segments.push({
+                type: 'text',
+                value: textContent.slice(lastIndex),
+            });
+        }
+
+        return hasMath ? segments : null;
     }
 
     clearProgressContainer() {

@@ -576,7 +576,7 @@ async def process_main_with_websocket(
                     call_llm_with_websocket,
                     prompt,
                     tx.clone(),
-                    0.9,
+                    config.temperature,
                     None,
                     progress_tracker,
                     task_id,
@@ -630,7 +630,7 @@ async def process_main_with_websocket(
 async def call_llm_with_websocket(
     prompt: str,
     tx,
-    temperature: float,
+    temperature: Optional[float],
     max_tokens: Optional[int],
     progress_tracker: WebSocketProgressTracker,
     task_id: str,
@@ -646,12 +646,15 @@ async def call_llm_with_websocket(
     async with tx:
         try:
             # Start task trace
+            effective_temperature = temperature if temperature is not None else config.temperature
+            effective_max_tokens = max_tokens if max_tokens is not None else config.max_tokens
+
             if trace_logger:
                 task_trace = trace_logger.start_task(
                     trace_id or task_id,
                     config.model_name,
                     prompt,
-                    {"temperature": temperature, "max_tokens": max_tokens}
+                    {"temperature": effective_temperature, "max_tokens": effective_max_tokens}
                 )
 
             # Update progress to show started
@@ -664,7 +667,13 @@ async def call_llm_with_websocket(
             print(f"[DEBUG] Starting streaming call for task {task_id}")
 
             async for chunk_type, content in call_llm_streaming(
-                prompt, temperature, max_tokens, trace_logger, trace_id
+                prompt,
+                temperature=effective_temperature,
+                max_tokens=effective_max_tokens,
+                system=None,
+                trace_logger=trace_logger,
+                trace_id=trace_id,
+                metadata={"task_id": task_id},
             ):
                 normalized_content = _normalize_stream_content(content)
                 preview = normalized_content[:50]
@@ -782,7 +791,10 @@ async def synthesize_result_websocket(
                 trace_id,
                 config.model_name,
                 user_prompt,
-                {"system": system_prompt, "temperature": 0.2}
+                {
+                    "system": system_prompt,
+                    "temperature": config.synthesis_temperature,
+                },
             )
 
         print(f"[DEBUG] Synthesis: Starting streaming call")
@@ -791,11 +803,14 @@ async def synthesize_result_websocket(
         thinking_content = ""
         response_content = ""
 
-        # Create complete prompt with system message
-        complete_prompt = f"System: {system_prompt}\n\nUser: {user_prompt}"
-
         async for chunk_type, content in call_llm_streaming(
-            complete_prompt, 0.2, None, trace_logger, trace_id
+            user_prompt,
+            temperature=config.synthesis_temperature,
+            max_tokens=None,
+            system=system_prompt,
+            trace_logger=trace_logger,
+            trace_id=trace_id,
+            metadata={"phase": "synthesis"},
         ):
             normalized_content = _normalize_stream_content(content)
             preview = normalized_content[:50]
