@@ -19,6 +19,7 @@
                 <span class="profile-badge" id="active-profile">Profile: --</span>
             </div>
             <div class="header-controls">
+                <button id="trace-btn" class="icon-btn" title="Trace History">📊</button>
                 <button id="settings-btn" class="icon-btn" title="Settings">⚙️</button>
                 <button id="clear-btn" class="icon-btn" title="Clear Chat">🗑️</button>
             </div>
@@ -188,6 +189,146 @@
                     <div class="form-actions">
                         <button type="button" id="save-settings" class="primary-btn">Save Settings</button>
                         <button type="button" id="cancel-settings" class="secondary-btn">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trace History Modal -->
+    <div class="modal-overlay" id="trace-modal-overlay">
+        <div class="modal trace-modal" id="trace-modal">
+            <div class="modal-header">
+                <h3>📊 Trace History</h3>
+                <button class="modal-close" id="trace-close">×</button>
+            </div>
+            <div class="modal-content trace-content">
+                <div class="trace-layout">
+                    <!-- Left Panel: Trace List -->
+                    <div class="trace-list-panel">
+                        <div class="trace-list-header">
+                            <h4>Sessions</h4>
+                            <button id="refresh-traces" class="icon-btn-small" title="Refresh">🔄</button>
+                        </div>
+                        <div class="trace-search">
+                            <input type="text" id="trace-search-input" placeholder="Search traces..." />
+                        </div>
+                        <div class="trace-list" id="trace-list">
+                            <div class="loading-message">Loading traces...</div>
+                        </div>
+                    </div>
+
+                    <!-- Right Panel: Trace Detail -->
+                    <div class="trace-detail-panel">
+                        <div class="trace-detail-empty" id="trace-empty-state">
+                            <div class="empty-icon">📋</div>
+                            <h4>No Trace Selected</h4>
+                            <p>Select a trace from the list to view details</p>
+                        </div>
+                        <div class="trace-detail-content" id="trace-detail-content" style="display: none;">
+                            <!-- Session Info -->
+                            <div class="trace-session-info">
+                                <h4 id="trace-session-title">Session Details</h4>
+                                <div class="trace-meta-grid">
+                                    <div class="trace-meta-item">
+                                        <span class="meta-label">Session ID:</span>
+                                        <span class="meta-value" id="trace-session-id">-</span>
+                                    </div>
+                                    <div class="trace-meta-item">
+                                        <span class="meta-label">Created:</span>
+                                        <span class="meta-value" id="trace-created-at">-</span>
+                                    </div>
+                                    <div class="trace-meta-item">
+                                        <span class="meta-label">Total Tasks:</span>
+                                        <span class="meta-value" id="trace-total-tasks">-</span>
+                                    </div>
+                                    <div class="trace-meta-item">
+                                        <span class="meta-label">Mode:</span>
+                                        <span class="meta-value" id="trace-mode">-</span>
+                                    </div>
+                                </div>
+                                <div class="trace-actions">
+                                    <button id="export-trace" class="secondary-btn-small">📥 Export</button>
+                                    <button id="delete-trace" class="danger-btn-small">🗑️ Delete</button>
+                                </div>
+                            </div>
+
+                            <!-- Task Timeline -->
+                            <div class="trace-timeline">
+                                <h4>Task Timeline</h4>
+                                <div class="timeline-container" id="trace-timeline">
+                                    <div class="loading-message">Loading tasks...</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task Detail Modal (for trace tasks) -->
+    <div class="modal-overlay" id="trace-task-modal-overlay">
+        <div class="modal" id="trace-task-modal">
+            <div class="modal-header">
+                <h3 id="trace-task-modal-title">Task Details</h3>
+                <button class="modal-close" id="trace-task-modal-close">×</button>
+            </div>
+            <div class="modal-content">
+                <div class="modal-tabs">
+                    <button class="tab-btn active" data-tab="input">📝 Input</button>
+                    <button class="tab-btn" data-tab="thinking">🤔 Thinking</button>
+                    <button class="tab-btn" data-tab="content">💬 Content</button>
+                    <button class="tab-btn" data-tab="stats">📊 Stats</button>
+                </div>
+                <div class="modal-body">
+                    <div class="tab-content active" id="input-tab">
+                        <div class="trace-task-section">
+                            <h5>Model</h5>
+                            <p id="trace-task-model"></p>
+                        </div>
+                        <div class="trace-task-section">
+                            <h5>Prompt</h5>
+                            <pre id="trace-task-prompt"></pre>
+                        </div>
+                        <div class="trace-task-section">
+                            <h5>Metadata</h5>
+                            <pre id="trace-task-input-metadata"></pre>
+                        </div>
+                    </div>
+                    <div class="tab-content" id="thinking-tab">
+                        <pre id="trace-task-thinking"></pre>
+                    </div>
+                    <div class="tab-content" id="content-tab">
+                        <div id="trace-task-content"></div>
+                    </div>
+                    <div class="tab-content" id="stats-tab">
+                        <div class="stats-grid-detailed">
+                            <div class="stat-item-detailed">
+                                <span class="stat-label">Status:</span>
+                                <span class="stat-value" id="trace-task-status"></span>
+                            </div>
+                            <div class="stat-item-detailed">
+                                <span class="stat-label">Duration:</span>
+                                <span class="stat-value" id="trace-task-duration"></span>
+                            </div>
+                            <div class="stat-item-detailed">
+                                <span class="stat-label">Total Tokens:</span>
+                                <span class="stat-value" id="trace-task-total-tokens"></span>
+                            </div>
+                            <div class="stat-item-detailed">
+                                <span class="stat-label">Thinking Tokens:</span>
+                                <span class="stat-value" id="trace-task-thinking-tokens"></span>
+                            </div>
+                            <div class="stat-item-detailed">
+                                <span class="stat-label">Content Tokens:</span>
+                                <span class="stat-value" id="trace-task-content-tokens"></span>
+                            </div>
+                            <div class="stat-item-detailed">
+                                <span class="stat-label">Error:</span>
+                                <span class="stat-value" id="trace-task-error">None</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

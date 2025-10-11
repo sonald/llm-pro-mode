@@ -38,6 +38,11 @@ class LLMProWebApp {
         this.activeProfileName = null;
         this.defaultProfileName = null;
 
+        // Trace viewer state
+        this.traces = [];
+        this.currentTrace = null;
+        this.currentTraceFilename = null;
+
         this.initializeMarked();
         this.initializeElements();
         this.bindEvents();
@@ -123,6 +128,40 @@ class LLMProWebApp {
         this.modelInput = document.getElementById('model-select');
         this.apiBaseInput = document.getElementById('api-base');
         this.apiKeyInput = document.getElementById('api-key');
+
+        // Trace viewer elements
+        this.traceBtn = document.getElementById('trace-btn');
+        this.traceModal = document.getElementById('trace-modal-overlay');
+        this.traceClose = document.getElementById('trace-close');
+        this.traceList = document.getElementById('trace-list');
+        this.traceSearchInput = document.getElementById('trace-search-input');
+        this.refreshTracesBtn = document.getElementById('refresh-traces');
+        this.traceEmptyState = document.getElementById('trace-empty-state');
+        this.traceDetailContent = document.getElementById('trace-detail-content');
+        this.traceTimeline = document.getElementById('trace-timeline');
+        this.exportTraceBtn = document.getElementById('export-trace');
+        this.deleteTraceBtn = document.getElementById('delete-trace');
+
+        // Trace task modal elements
+        this.traceTaskModal = document.getElementById('trace-task-modal-overlay');
+        this.traceTaskModalClose = document.getElementById('trace-task-modal-close');
+
+        // Debug: Log trace elements initialization
+        console.log('Trace elements initialized:', {
+            traceBtn: !!this.traceBtn,
+            traceModal: !!this.traceModal,
+            traceClose: !!this.traceClose,
+            traceList: !!this.traceList,
+            traceSearchInput: !!this.traceSearchInput,
+            refreshTracesBtn: !!this.refreshTracesBtn,
+            traceEmptyState: !!this.traceEmptyState,
+            traceDetailContent: !!this.traceDetailContent,
+            traceTimeline: !!this.traceTimeline,
+            exportTraceBtn: !!this.exportTraceBtn,
+            deleteTraceBtn: !!this.deleteTraceBtn,
+            traceTaskModal: !!this.traceTaskModal,
+            traceTaskModalClose: !!this.traceTaskModalClose
+        });
     }
 
     bindEvents() {
@@ -173,11 +212,48 @@ class LLMProWebApp {
             this.profileSelect.addEventListener('change', () => this.handleProfileSelectionChange());
         }
 
+        // Trace viewer events
+        if (this.traceBtn) {
+            this.traceBtn.addEventListener('click', () => this.openTraceModal());
+        }
+        if (this.traceClose) {
+            this.traceClose.addEventListener('click', () => this.closeTraceModal());
+        }
+        if (this.traceModal) {
+            this.traceModal.addEventListener('click', (e) => {
+                if (e.target === this.traceModal) this.closeTraceModal();
+            });
+        }
+        if (this.refreshTracesBtn) {
+            this.refreshTracesBtn.addEventListener('click', () => this.loadTraces());
+        }
+        if (this.traceSearchInput) {
+            this.traceSearchInput.addEventListener('input', (e) => this.filterTraces(e.target.value));
+        }
+        if (this.exportTraceBtn) {
+            this.exportTraceBtn.addEventListener('click', () => this.exportTrace());
+        }
+        if (this.deleteTraceBtn) {
+            this.deleteTraceBtn.addEventListener('click', () => this.deleteTrace());
+        }
+
+        // Trace task modal events
+        if (this.traceTaskModalClose) {
+            this.traceTaskModalClose.addEventListener('click', () => this.closeTraceTaskModal());
+        }
+        if (this.traceTaskModal) {
+            this.traceTaskModal.addEventListener('click', (e) => {
+                if (e.target === this.traceTaskModal) this.closeTraceTaskModal();
+            });
+        }
+
         // ESC key handling
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 this.closeTaskModal();
                 this.closeSettingsModal();
+                this.closeTraceModal();
+                this.closeTraceTaskModal();
             }
         });
     }
@@ -1313,6 +1389,319 @@ class LLMProWebApp {
         this.avgTimeEl.textContent = `${Math.round(this.stats.avgTime)}ms`;
         this.successRateEl.textContent = `${Math.round(this.stats.successRate)}%`;
         this.totalTasksEl.textContent = this.stats.totalTasks;
+    }
+
+    // ============ Trace Viewer Methods ============
+
+    async openTraceModal() {
+        console.log('openTraceModal called');
+        if (!this.traceModal) {
+            console.error('traceModal element not found');
+            return;
+        }
+        this.traceModal.classList.add('active');
+        await this.loadTraces();
+    }
+
+    closeTraceModal() {
+        this.traceModal.classList.remove('active');
+        this.currentTrace = null;
+        this.currentTraceFilename = null;
+    }
+
+    async loadTraces() {
+        try {
+            this.traceList.innerHTML = '<div class="loading-message">Loading traces...</div>';
+            const response = await fetch('/api/traces');
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            this.traces = data.traces || [];
+            this.renderTraceList();
+        } catch (error) {
+            console.error('Failed to load traces:', error);
+            this.traceList.innerHTML = '<div class="error-message">Failed to load traces</div>';
+        }
+    }
+
+    renderTraceList() {
+        if (this.traces.length === 0) {
+            this.traceList.innerHTML = '<div class="no-traces-message">No traces found</div>';
+            return;
+        }
+
+        this.traceList.innerHTML = '';
+        this.traces.forEach(trace => {
+            const card = document.createElement('div');
+            card.className = 'trace-card';
+            if (this.currentTraceFilename === trace.filename) {
+                card.classList.add('active');
+            }
+
+            const successRate = trace.total_tasks > 0
+                ? Math.round((trace.completed_tasks / trace.total_tasks) * 100)
+                : 0;
+
+            card.innerHTML = `
+                <div class="trace-card-header">
+                    <span class="trace-session-id">${trace.session_id}</span>
+                    <span class="trace-mode-badge ${trace.mode}">${trace.mode}</span>
+                </div>
+                <div class="trace-card-info">
+                    <div class="trace-info-row">
+                        <span class="info-label">📅</span>
+                        <span class="info-value">${this.formatDateTime(trace.created_at)}</span>
+                    </div>
+                    <div class="trace-info-row">
+                        <span class="info-label">📝</span>
+                        <span class="info-value">${trace.total_tasks} tasks</span>
+                    </div>
+                    <div class="trace-info-row">
+                        <span class="info-label">✅</span>
+                        <span class="info-value">${successRate}% success</span>
+                    </div>
+                    ${trace.mode === 'full' ? `
+                    <div class="trace-info-row">
+                        <span class="info-label">🎯</span>
+                        <span class="info-value">${trace.total_tokens.toLocaleString()} tokens</span>
+                    </div>
+                    ` : ''}
+                </div>
+            `;
+
+            card.addEventListener('click', () => this.selectTrace(trace.filename));
+            this.traceList.appendChild(card);
+        });
+    }
+
+    async selectTrace(filename) {
+        try {
+            this.currentTraceFilename = filename;
+            this.renderTraceList(); // Update active state
+
+            // Show loading state
+            this.traceDetailContent.style.display = 'block';
+            this.traceEmptyState.style.display = 'none';
+            this.traceTimeline.innerHTML = '<div class="loading-message">Loading trace details...</div>';
+
+            const response = await fetch(`/api/traces/${filename}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            this.currentTrace = await response.json();
+
+            this.renderTraceDetails();
+        } catch (error) {
+            console.error('Failed to load trace:', error);
+            this.traceTimeline.innerHTML = '<div class="error-message">Failed to load trace details</div>';
+        }
+    }
+
+    renderTraceDetails() {
+        if (!this.currentTrace) return;
+
+        const sessionInfo = this.currentTrace.session_info || {};
+
+        // Update session info
+        document.getElementById('trace-session-id').textContent = sessionInfo.session_id || '-';
+        document.getElementById('trace-created-at').textContent = this.formatDateTime(sessionInfo.created_at);
+        document.getElementById('trace-total-tasks').textContent = sessionInfo.total_tasks || 0;
+        document.getElementById('trace-mode').textContent = sessionInfo.mode || 'full';
+
+        // Render task timeline
+        this.renderTaskTimeline();
+    }
+
+    renderTaskTimeline() {
+        const traces = this.currentTrace.traces || [];
+
+        if (traces.length === 0) {
+            this.traceTimeline.innerHTML = '<div class="no-tasks-message">No tasks in this trace</div>';
+            return;
+        }
+
+        this.traceTimeline.innerHTML = '';
+
+        traces.forEach((task, index) => {
+            const taskCard = document.createElement('div');
+            taskCard.className = `timeline-task ${task.status}`;
+
+            const duration = task.duration_ms ? `${task.duration_ms}ms` : '-';
+            const tokens = task.output?.total_tokens || 0;
+            const mode = this.currentTrace.session_info?.mode || 'full';
+
+            taskCard.innerHTML = `
+                <div class="timeline-task-header">
+                    <span class="task-number">#${index + 1}</span>
+                    <span class="task-id">${task.task_id || `task_${index}`}</span>
+                    <span class="task-status-badge ${task.status}">${this.getStatusIcon(task.status)}</span>
+                </div>
+                <div class="timeline-task-body">
+                    <div class="task-meta-row">
+                        <span class="task-meta-label">Model:</span>
+                        <span class="task-meta-value">${task.model || '-'}</span>
+                    </div>
+                    <div class="task-meta-row">
+                        <span class="task-meta-label">Duration:</span>
+                        <span class="task-meta-value">${duration}</span>
+                    </div>
+                    ${mode === 'full' ? `
+                    <div class="task-meta-row">
+                        <span class="task-meta-label">Tokens:</span>
+                        <span class="task-meta-value">${tokens.toLocaleString()}</span>
+                    </div>
+                    ` : ''}
+                    ${task.error ? `
+                    <div class="task-error">
+                        <span class="error-label">❌ Error:</span>
+                        <span class="error-text">${task.error}</span>
+                    </div>
+                    ` : ''}
+                </div>
+            `;
+
+            taskCard.addEventListener('click', () => this.openTraceTaskModal(task, index + 1));
+            this.traceTimeline.appendChild(taskCard);
+        });
+    }
+
+    openTraceTaskModal(task, taskNumber) {
+        document.getElementById('trace-task-modal-title').textContent = `Task #${taskNumber} - ${task.task_id || 'Unknown'}`;
+
+        // Input tab
+        document.getElementById('trace-task-model').textContent = task.model || '-';
+        document.getElementById('trace-task-prompt').textContent =
+            typeof task.input === 'string' ? task.input :
+            task.input?.prompt || JSON.stringify(task.input, null, 2) || 'No prompt';
+        document.getElementById('trace-task-input-metadata').textContent =
+            JSON.stringify(task.input?.metadata || {}, null, 2);
+
+        // Thinking tab
+        document.getElementById('trace-task-thinking').textContent = task.thinking || 'No thinking content';
+
+        // Content tab
+        const contentHtml = task.content ? this.renderMarkdown(task.content) : '<p>No content</p>';
+        document.getElementById('trace-task-content').innerHTML = contentHtml;
+        this.deferMathRendering(document.getElementById('trace-task-content'));
+
+        // Stats tab
+        const mode = this.currentTrace.session_info?.mode || 'full';
+        document.getElementById('trace-task-status').textContent = task.status || '-';
+        document.getElementById('trace-task-duration').textContent = task.duration_ms ? `${task.duration_ms}ms` : '-';
+
+        if (mode === 'full') {
+            document.getElementById('trace-task-total-tokens').textContent =
+                (task.output?.total_tokens || 0).toLocaleString();
+            document.getElementById('trace-task-thinking-tokens').textContent =
+                (task.output?.thinking_tokens || 0).toLocaleString();
+            document.getElementById('trace-task-content-tokens').textContent =
+                (task.output?.content_tokens || 0).toLocaleString();
+        } else {
+            document.getElementById('trace-task-total-tokens').textContent = 'N/A (compact mode)';
+            document.getElementById('trace-task-thinking-tokens').textContent = 'N/A (compact mode)';
+            document.getElementById('trace-task-content-tokens').textContent = 'N/A (compact mode)';
+        }
+
+        document.getElementById('trace-task-error').textContent = task.error || 'None';
+
+        // Switch to input tab by default
+        const tabBtns = this.traceTaskModal.querySelectorAll('.tab-btn');
+        const tabContents = this.traceTaskModal.querySelectorAll('.tab-content');
+        tabBtns.forEach(btn => btn.classList.remove('active'));
+        tabContents.forEach(content => content.classList.remove('active'));
+        tabBtns[0].classList.add('active');
+        tabContents[0].classList.add('active');
+
+        this.traceTaskModal.classList.add('active');
+    }
+
+    closeTraceTaskModal() {
+        this.traceTaskModal.classList.remove('active');
+    }
+
+    filterTraces(searchTerm) {
+        const filtered = this.traces.filter(trace => {
+            const term = searchTerm.toLowerCase();
+            return trace.session_id.toLowerCase().includes(term) ||
+                   trace.filename.toLowerCase().includes(term) ||
+                   trace.created_at.toLowerCase().includes(term);
+        });
+
+        // Render filtered list
+        const originalTraces = this.traces;
+        this.traces = filtered;
+        this.renderTraceList();
+        this.traces = originalTraces;
+    }
+
+    async exportTrace() {
+        if (!this.currentTrace || !this.currentTraceFilename) {
+            alert('No trace selected');
+            return;
+        }
+
+        const dataStr = JSON.stringify(this.currentTrace, null, 2);
+        const blob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = this.currentTraceFilename.replace('.yaml', '.json');
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    }
+
+    async deleteTrace() {
+        if (!this.currentTraceFilename) {
+            alert('No trace selected');
+            return;
+        }
+
+        if (!confirm(`Are you sure you want to delete trace "${this.currentTraceFilename}"?`)) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/traces/${this.currentTraceFilename}`, {
+                method: 'DELETE'
+            });
+
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+            // Clear current trace and reload list
+            this.currentTrace = null;
+            this.currentTraceFilename = null;
+            this.traceDetailContent.style.display = 'none';
+            this.traceEmptyState.style.display = 'flex';
+            await this.loadTraces();
+        } catch (error) {
+            console.error('Failed to delete trace:', error);
+            alert('Failed to delete trace');
+        }
+    }
+
+    formatDateTime(isoString) {
+        if (!isoString) return '-';
+        try {
+            const date = new Date(isoString);
+            return date.toLocaleString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        } catch {
+            return isoString;
+        }
+    }
+
+    getStatusIcon(status) {
+        const icons = {
+            'completed': '✅',
+            'failed': '❌',
+            'running': '🔄',
+            'cancelled': '⏹️'
+        };
+        return icons[status] || '❓';
     }
 }
 

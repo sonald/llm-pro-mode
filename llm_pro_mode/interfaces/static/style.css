@@ -1116,3 +1116,566 @@ body {
         background: #1e293b;
     }
 }
+
+/* ============================================ */
+/* TRACE VIEWER STYLES */
+/* ============================================ */
+
+/* Trace Modal Specific Styles */
+.trace-modal {
+    max-width: 95%;
+    width: 1400px;
+    max-height: 90vh;
+}
+
+.trace-content {
+    padding: 0;
+    max-height: calc(90vh - 60px);
+    overflow: hidden;
+}
+
+/* Trace Layout - Two Panel Design */
+.trace-layout {
+    display: flex;
+    height: calc(90vh - 60px);
+    min-height: 0;
+}
+
+/* Left Panel - Trace List */
+.trace-list-panel {
+    width: 350px;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+}
+
+.trace-list-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.trace-list-header h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0;
+}
+
+.icon-btn-small {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: background-color 0.2s;
+}
+
+.icon-btn-small:hover {
+    background: var(--surface-hover);
+}
+
+.trace-search {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.trace-search input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
+    color: var(--text);
+    font-size: 0.875rem;
+    transition: border-color 0.2s;
+}
+
+.trace-search input:focus {
+    outline: none;
+    border-color: var(--primary-color);
+}
+
+.trace-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.75rem;
+    min-height: 0;
+}
+
+.loading-message,
+.error-message,
+.no-traces-message {
+    text-align: center;
+    padding: 2rem 1rem;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+.error-message {
+    color: var(--error-color);
+}
+
+/* Trace Card */
+.trace-card {
+    background: var(--background);
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.75rem;
+    margin-bottom: 0.75rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.trace-card:hover {
+    border-color: var(--primary-color);
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1);
+    transform: translateY(-1px);
+}
+
+.trace-card.active {
+    border-color: var(--primary-color);
+    background: rgba(37, 99, 235, 0.05);
+}
+
+.trace-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.trace-session-id {
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: var(--text);
+}
+
+.trace-mode-badge {
+    font-size: 0.7rem;
+    padding: 0.125rem 0.5rem;
+    border-radius: 12px;
+    font-weight: 500;
+    text-transform: uppercase;
+}
+
+.trace-mode-badge.full {
+    background: var(--success-color);
+    color: white;
+}
+
+.trace-mode-badge.compact {
+    background: var(--warning-color);
+    color: white;
+}
+
+.trace-card-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.trace-info-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+}
+
+.info-label {
+    font-size: 0.9rem;
+}
+
+.info-value {
+    color: var(--text-muted);
+}
+
+/* Right Panel - Trace Detail */
+.trace-detail-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    background: var(--background);
+}
+
+.trace-detail-empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: var(--text-muted);
+    padding: 2rem;
+}
+
+.empty-icon {
+    font-size: 4rem;
+    margin-bottom: 1rem;
+    opacity: 0.5;
+}
+
+.trace-detail-empty h4 {
+    margin-bottom: 0.5rem;
+    color: var(--text);
+}
+
+.trace-detail-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.5rem;
+}
+
+/* Session Info Section */
+.trace-session-info {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.trace-session-info h4 {
+    margin: 0 0 1rem 0;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.trace-meta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.trace-meta-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.meta-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.meta-value {
+    font-weight: 600;
+    color: var(--text);
+}
+
+.trace-actions {
+    display: flex;
+    gap: 0.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+}
+
+.secondary-btn-small {
+    flex: 1;
+    padding: 0.5rem 1rem;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25rem;
+}
+
+.secondary-btn-small:hover {
+    background: var(--surface-hover);
+    border-color: var(--text-muted);
+}
+
+.danger-btn-small {
+    flex: 1;
+    padding: 0.5rem 1rem;
+    background: transparent;
+    color: var(--error-color);
+    border: 1px solid var(--error-color);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25rem;
+}
+
+.danger-btn-small:hover {
+    background: var(--error-color);
+    color: white;
+}
+
+/* Task Timeline Section */
+.trace-timeline {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 1.5rem;
+}
+
+.trace-timeline h4 {
+    margin: 0 0 1rem 0;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.timeline-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.no-tasks-message {
+    text-align: center;
+    padding: 2rem 1rem;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+/* Timeline Task Card */
+.timeline-task {
+    background: var(--background);
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.timeline-task:hover {
+    border-color: var(--primary-color);
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.1);
+    transform: translateX(2px);
+}
+
+.timeline-task.completed {
+    border-left: 4px solid var(--success-color);
+}
+
+.timeline-task.failed {
+    border-left: 4px solid var(--error-color);
+}
+
+.timeline-task.running {
+    border-left: 4px solid var(--warning-color);
+}
+
+.timeline-task.cancelled {
+    border-left: 4px solid var(--secondary-color);
+}
+
+.timeline-task-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.task-number {
+    font-weight: 700;
+    font-size: 0.875rem;
+    color: var(--primary-color);
+}
+
+.task-id {
+    font-size: 0.875rem;
+    color: var(--text);
+    font-family: 'SF Mono', 'Monaco', monospace;
+}
+
+.task-status-badge {
+    margin-left: auto;
+    font-size: 1rem;
+}
+
+.timeline-task-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.task-meta-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.8rem;
+}
+
+.task-meta-label {
+    color: var(--text-muted);
+}
+
+.task-meta-value {
+    font-weight: 600;
+    color: var(--text);
+}
+
+.task-error {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid var(--error-color);
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.error-label {
+    font-weight: 600;
+    font-size: 0.75rem;
+    color: var(--error-color);
+}
+
+.error-text {
+    font-size: 0.75rem;
+    color: var(--text);
+}
+
+/* Trace Task Modal Specific Styles */
+.trace-task-section {
+    margin-bottom: 1.5rem;
+}
+
+.trace-task-section h5 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: var(--text);
+}
+
+.trace-task-section p {
+    margin: 0;
+    color: var(--text);
+}
+
+.trace-task-section pre {
+    background: var(--surface);
+    padding: 1rem;
+    border-radius: var(--radius);
+    white-space: pre-wrap;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    overflow-x: auto;
+    margin: 0;
+}
+
+.stats-grid-detailed {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+.stat-item-detailed {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 1rem;
+    background: var(--surface);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+}
+
+.stat-item-detailed .stat-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.stat-item-detailed .stat-value {
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--text);
+}
+
+/* Responsive Design for Trace Viewer */
+@media (max-width: 1024px) {
+    .trace-modal {
+        width: 98%;
+        max-height: 95vh;
+    }
+
+    .trace-layout {
+        flex-direction: column;
+        height: auto;
+    }
+
+    .trace-list-panel {
+        width: 100%;
+        max-height: 40vh;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .trace-detail-panel {
+        max-height: 50vh;
+    }
+
+    .trace-meta-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .stats-grid-detailed {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Animation for trace cards */
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.trace-card,
+.timeline-task {
+    animation: slideIn 0.3s ease-out;
+}
+
+/* Scrollbar for trace panels */
+.trace-list::-webkit-scrollbar,
+.trace-detail-content::-webkit-scrollbar {
+    width: 6px;
+}
+
+.trace-list::-webkit-scrollbar-track,
+.trace-detail-content::-webkit-scrollbar-track {
+    background: var(--surface);
+}
+
+.trace-list::-webkit-scrollbar-thumb,
+.trace-detail-content::-webkit-scrollbar-thumb {
+    background: var(--text-light);
+    border-radius: 3px;
+}
+
+.trace-list::-webkit-scrollbar-thumb:hover,
+.trace-detail-content::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}
