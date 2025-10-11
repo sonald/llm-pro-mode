@@ -26,6 +26,7 @@ from ..core.processor import Processor, ProcessorHooks, RunContext, ProcessorRes
 from ..core.llm_client import LLMChunk, LLMResult
 from ..logger import get_logger
 from ..tracing.logger import TraceLogger
+from .support import SimpleStatsCollector, create_trace_logger
 
 
 CancelledError = asyncio.CancelledError
@@ -139,55 +140,6 @@ class WebSocketManager:
                 except Exception as e:
                     print(f"Error broadcasting to {conn_id}: {e}")
                     self.disconnect(conn_id)
-
-
-class SimpleStatsCollector:
-    """Collects basic statistics without full tracing."""
-
-    def __init__(self):
-        self.total_tasks = 0
-        self.completed_tasks = 0
-        self.cancelled_tasks = 0
-        self.total_tokens = 0
-        self.total_duration_ms = 0
-        self.start_times: Dict[str, float] = {}
-
-    def start_task(self, task_id: str):
-        import time
-        self.total_tasks += 1
-        self.start_times[task_id] = time.time() * 1000
-
-    def complete_task(
-        self,
-        task_id: str,
-        success: bool = True,
-        token_count: int = 0,
-        status: Optional[str] = None,
-    ):
-        import time
-        final_status = status or ("completed" if success else "failed")
-        if final_status == "completed":
-            self.completed_tasks += 1
-        elif final_status == "cancelled":
-            self.cancelled_tasks += 1
-        self.total_tokens += token_count
-
-        if task_id in self.start_times:
-            duration = time.time() * 1000 - self.start_times[task_id]
-            self.total_duration_ms += duration
-            del self.start_times[task_id]
-
-    def get_stats(self) -> Dict[str, Any]:
-        avg_duration = self.total_duration_ms / max(1, self.completed_tasks)
-        effective_total = self.total_tasks - self.cancelled_tasks
-        success_rate = self.completed_tasks / max(1, effective_total)
-
-        return {
-            "total_tasks": self.total_tasks,
-            "total_tokens": self.total_tokens,
-            "avg_duration_ms": avg_duration,
-            "success_rate": success_rate
-        }
 
 
 class WebSocketProgressTracker:
@@ -745,15 +697,11 @@ async def handle_completion_request(connection_id: str, session_id: str, request
     enable_trace = request_data.get("enable_trace", False)
     trace_compact = request_data.get("trace_compact", True)
 
-    # Create trace logger if enabled
-    trace_logger = None
-    if enable_trace:
-        config = _current_config()
-        trace_logger = TraceLogger(
-            trace_dir=config.trace_dir,
-            enabled=True,
-            compact_mode=trace_compact,
-        )
+    trace_logger = create_trace_logger(
+        _current_config(),
+        enabled=enable_trace,
+        compact_mode=trace_compact,
+    )
 
     try:
         # Process with WebSocket progress tracking

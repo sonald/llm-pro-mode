@@ -14,7 +14,7 @@ from ..config.runtime import RuntimeState
 from ..core.processor import Processor
 from ..logger import get_logger
 from ..models.schemas import Request
-from ..tracing.logger import TraceLogger
+from .support import create_trace_logger
 
 
 app = FastAPI()
@@ -39,13 +39,11 @@ async def completion(request: Request):
     state = _require_state()
     config = state.config
 
-    trace_logger: TraceLogger | None = None
-    if request.enable_trace:
-        trace_logger = TraceLogger(
-            trace_dir=config.trace_dir,
-            enabled=True,
-            compact_mode=request.trace_compact,
-        )
+    trace_logger = create_trace_logger(
+        config,
+        enabled=request.enable_trace,
+        compact_mode=request.trace_compact,
+    )
 
     try:
         processor = Processor(config)
@@ -57,7 +55,7 @@ async def completion(request: Request):
 
         content = result.best_text() or ""
 
-        if request.enable_trace and trace_logger and trace_logger.traces:
+        if trace_logger and trace_logger.traces:
             stats = trace_logger.get_stats()
             trace_info = f"\n\n<!-- Debug Info: {stats} -->"
             content += trace_info

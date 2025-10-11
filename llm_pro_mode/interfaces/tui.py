@@ -14,6 +14,7 @@ from ..config import Config
 from ..core.processor import Processor, ProcessorHooks, RunContext, ProcessorResult
 from ..core.llm_client import LLMChunk, LLMResult
 from ..tracing.logger import TraceLogger
+from .support import create_trace_logger
 
 
 class LLMProTUI(App):
@@ -263,20 +264,18 @@ class LLMProTUI(App):
         self.clear_progress_tasks()
         self.create_progress_tasks()
 
-        trace_logger = None
-        if self.enable_trace:
-            trace_logger = TraceLogger(
-                trace_dir=self.config.trace_dir,
-                enabled=True,
-                compact_mode=self.trace_compact,
-            )
+        trace_logger = create_trace_logger(
+            self.config,
+            enabled=self.enable_trace,
+            compact_mode=self.trace_compact,
+        )
 
         processor = Processor(self.config, hooks=self._build_hooks())
 
         try:
             result = await processor.run(prompt, trace_logger=trace_logger)
             self._display_result(result)
-            if self.enable_trace and trace_logger:
+            if trace_logger:
                 self._display_trace_info(trace_logger)
         except Exception as exc:
             error_msg = Text(f"❌ Error: {str(exc)}", style="bold red")

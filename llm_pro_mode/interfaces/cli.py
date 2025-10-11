@@ -14,6 +14,7 @@ from ..config import Config
 from ..core.processor import Processor, ProcessorHooks, ProcessorResult, RunContext
 from ..logger import console, error as log_error, warning as log_warning
 from ..tracing.logger import TraceLogger
+from .support import create_trace_logger
 
 
 @dataclass
@@ -204,13 +205,11 @@ def cli_main(args, config: Config) -> int:
     if prompt is None:
         return 1
 
-    trace_logger = None
-    if config.trace_enabled:
-        trace_logger = TraceLogger(
-            trace_dir=config.trace_dir,
-            enabled=True,
-            compact_mode=config.trace_compact,
-        )
+    trace_logger = create_trace_logger(
+        config,
+        enabled=config.trace_enabled,
+        compact_mode=config.trace_compact,
+    )
 
     try:
         result = anyio.run(_execute, prompt, config, trace_logger)
