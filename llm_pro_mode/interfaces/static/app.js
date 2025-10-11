@@ -712,7 +712,20 @@ class LLMProWebApp {
     }
 
     handleError(data) {
-        console.error('Server error:', data.message);
+        console.error('Server error:', data.message, data);
+
+        if (data.error_code === 'task_busy') {
+            this.updateMonitorStatus(data.message || 'Task already running.');
+            setTimeout(() => {
+                if (this.isProcessing) {
+                    this.updateMonitorStatus('Processing...');
+                } else {
+                    this.updateMonitorStatus('Ready');
+                }
+            }, 1500);
+            return;
+        }
+
         this.addMessage('assistant', `❌ Error: ${data.message}`);
         this.setProcessingState(false);
         this.updateMonitorStatus('Error');

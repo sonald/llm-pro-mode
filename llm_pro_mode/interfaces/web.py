@@ -686,7 +686,8 @@ def create_web_app() -> FastAPI:
                     if current_job and not current_job.done():
                         await ws_manager.send_message(connection_id, {
                             "type": "error",
-                            "message": "Previous task is still running. Please wait or cancel it."
+                            "message": "Previous task is still running. Please wait or cancel it.",
+                            "error_code": "task_busy",
                         })
                         continue
 
