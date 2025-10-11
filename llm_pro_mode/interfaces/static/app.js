@@ -501,6 +501,16 @@ class LLMProWebApp {
 
         if (!message || !this.isConnected) return;
 
+        if (this.isProcessing) {
+            this.updateMonitorStatus('Already processing. Please wait or stop the current task.');
+            setTimeout(() => {
+                if (this.isProcessing) {
+                    this.updateMonitorStatus('Processing...');
+                }
+            }, 1200);
+            return;
+        }
+
         const parsedRuns = parseInt(this.nRunsInput.value, 10);
         const nRuns = Number.isFinite(parsedRuns) && parsedRuns > 0 ? parsedRuns : 3;
 
