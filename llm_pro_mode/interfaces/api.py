@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-import yaml
-from datetime import datetime
-from pathlib import Path
-from typing import List, Dict, Any
-
 from fastapi import FastAPI, Response, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -14,7 +9,12 @@ from ..config.runtime import RuntimeState
 from ..core.processor import Processor
 from ..logger import get_logger
 from ..models.schemas import Request
-from .support import create_trace_logger
+from .support import (
+    create_trace_logger,
+    delete_trace_file,
+    list_trace_metadata,
+    load_trace_content,
+)
 
 
 app = FastAPI()
@@ -73,88 +73,37 @@ async def list_traces():
     config = state.config
     trace_dir = Path(config.trace_dir)
 
-    if not trace_dir.exists():
-        return JSONResponse(content={"traces": []})
-
-    traces = []
-    for trace_file in sorted(trace_dir.glob("trace_*.yaml"), reverse=True):
-        try:
-            with open(trace_file, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-
-            session_info = data.get("session_info", {})
-            trace_list = data.get("traces", [])
-
-            # Calculate statistics
-            total_tasks = len(trace_list)
-            completed = sum(1 for t in trace_list if t.get("status") == "completed")
-            failed = sum(1 for t in trace_list if t.get("status") == "failed")
-            total_tokens = sum(
-                t.get("output", {}).get("total_tokens", 0) for t in trace_list
-            )
-
-            traces.append(
-                {
-                    "filename": trace_file.name,
-                    "session_id": session_info.get("session_id", "unknown"),
-                    "created_at": session_info.get("created_at", ""),
-                    "mode": session_info.get("mode", "full"),
-                    "total_tasks": total_tasks,
-                    "completed_tasks": completed,
-                    "failed_tasks": failed,
-                    "total_tokens": total_tokens,
-                    "size_bytes": trace_file.stat().st_size,
-                }
-            )
-        except Exception as exc:  # pragma: no cover
-            _logger.error("Failed to read trace file %s: %s", trace_file.name, exc)
-            continue
-
+    traces = list_trace_metadata(config, logger=_logger)
     return JSONResponse(content={"traces": traces})
 
 
 @app.get("/api/traces/{filename}")
 async def get_trace(filename: str):
     """Get specific trace file content."""
-    state = _require_state()
-    config = state.config
-    trace_dir = Path(config.trace_dir)
-    trace_file = trace_dir / filename
-
-    # Security check: prevent path traversal
-    if not trace_file.is_relative_to(trace_dir):
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    if not trace_file.exists():
-        raise HTTPException(status_code=404, detail="Trace file not found")
-
+    config = _require_state().config
     try:
-        with open(trace_file, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        return JSONResponse(content=data)
+        data = load_trace_content(config, filename, logger=_logger)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Trace file not found")
     except Exception as exc:  # pragma: no cover
-        _logger.error("Failed to read trace file %s: %s", filename, exc)
         raise HTTPException(status_code=500, detail=f"Failed to read trace: {exc}")
+
+    return JSONResponse(content=data)
 
 
 @app.delete("/api/traces/{filename}")
 async def delete_trace(filename: str):
     """Delete a specific trace file."""
-    state = _require_state()
-    config = state.config
-    trace_dir = Path(config.trace_dir)
-    trace_file = trace_dir / filename
-
-    # Security check: prevent path traversal
-    if not trace_file.is_relative_to(trace_dir):
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    if not trace_file.exists():
-        raise HTTPException(status_code=404, detail="Trace file not found")
-
+    config = _require_state().config
     try:
-        trace_file.unlink()
-        return JSONResponse(content={"success": True, "message": "Trace deleted"})
+        delete_trace_file(config, filename, logger=_logger)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Trace file not found")
     except Exception as exc:  # pragma: no cover
-        _logger.error("Failed to delete trace file %s: %s", filename, exc)
         raise HTTPException(status_code=500, detail=f"Failed to delete trace: {exc}")
+
+    return JSONResponse(content={"success": True, "message": "Trace deleted"})
