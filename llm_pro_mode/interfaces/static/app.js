@@ -360,7 +360,8 @@ class LLMProWebApp {
         const profile = this.profileData.profiles.find(item => item.name === selected);
 
         if (this.setDefaultProfileCheckbox) {
-            this.setDefaultProfileCheckbox.checked = selected === this.defaultProfileName;
+            // Default to checked for Web UI convenience, but show current default status
+            this.setDefaultProfileCheckbox.checked = (selected === this.defaultProfileName) || true;
         }
 
         if (profile) {
