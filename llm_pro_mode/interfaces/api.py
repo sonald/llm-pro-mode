@@ -2,42 +2,31 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI, Response, HTTPException
+from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 
 from ..config.runtime import RuntimeState
 from ..core.processor import Processor
 from ..logger import get_logger
 from ..models.schemas import Request
-from .support import (
-    create_trace_logger,
-    delete_trace_file,
-    list_trace_metadata,
-    load_trace_content,
-)
+from .runtime_context import RuntimeContext
+from .support import create_trace_logger
+from .trace_endpoints import register_trace_endpoints
 
 
 app = FastAPI()
-_runtime_state: RuntimeState | None = None
+_runtime_context = RuntimeContext("API")
 _logger = get_logger()
 
 
 def configure_runtime(state: RuntimeState) -> None:
-    global _runtime_state
-    _runtime_state = state
-
-
-def _require_state() -> RuntimeState:
-    if _runtime_state is None:
-        raise RuntimeError("API runtime state not configured")
-    return _runtime_state
+    _runtime_context.configure(state)
 
 
 @app.post("/completion")
 async def completion(request: Request):
     """API endpoint for LLM completion requests."""
-    state = _require_state()
-    config = state.config
+    config = _runtime_context.get_config()
 
     trace_logger = create_trace_logger(
         config,
@@ -66,42 +55,5 @@ async def completion(request: Request):
         return Response(content=f"Error: {exc}", status_code=500)
 
 
-@app.get("/api/traces")
-async def list_traces():
-    """List all trace files with metadata."""
-    state = _require_state()
-    config = state.config
-    traces = list_trace_metadata(config, logger=_logger)
-    return JSONResponse(content={"traces": traces})
-
-
-@app.get("/api/traces/{filename}")
-async def get_trace(filename: str):
-    """Get specific trace file content."""
-    config = _require_state().config
-    try:
-        data = load_trace_content(config, filename, logger=_logger)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Trace file not found")
-    except Exception as exc:  # pragma: no cover
-        raise HTTPException(status_code=500, detail=f"Failed to read trace: {exc}")
-
-    return JSONResponse(content=data)
-
-
-@app.delete("/api/traces/{filename}")
-async def delete_trace(filename: str):
-    """Delete a specific trace file."""
-    config = _require_state().config
-    try:
-        delete_trace_file(config, filename, logger=_logger)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Trace file not found")
-    except Exception as exc:  # pragma: no cover
-        raise HTTPException(status_code=500, detail=f"Failed to delete trace: {exc}")
-
-    return JSONResponse(content={"success": True, "message": "Trace deleted"})
+# Register shared trace management endpoints
+register_trace_endpoints(app, _runtime_context.get_config)

@@ -11,7 +11,7 @@ from llm_pro_mode.config import Config
 from llm_pro_mode.core.llm_client import (
     LLMClient,
     LLMRequest,
-    _normalize_reasoning_payload,
+    normalize_content,
 )
 
 
@@ -157,6 +157,6 @@ async def test_gather_result_accumulates_text_and_counts():
         (None, ""),
     ],
 )
-def test_normalize_reasoning_payload_variants(payload, expected):
-    """Ensure reasoning payload normalization handles nested structures."""
-    assert _normalize_reasoning_payload(payload) == expected
+def test_normalize_content_variants(payload, expected):
+    """Ensure content normalization handles nested structures."""
+    assert normalize_content(payload) == expected

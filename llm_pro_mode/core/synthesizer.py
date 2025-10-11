@@ -8,7 +8,15 @@ from .llm_client import LLMChunk, LLMClient, LLMResult
 from ..tracing.logger import TraceLogger
 
 
-def _build_synthesis_prompt(candidates: List[str]) -> tuple[str, str]:
+def build_synthesis_prompt(candidates: List[str]) -> tuple[str, str]:
+    """Build system and user prompts for synthesis.
+
+    Args:
+        candidates: List of candidate response texts to synthesize
+
+    Returns:
+        Tuple of (system_prompt, user_prompt) strings
+    """
     numbered = "\n\n".join(
         [
             f"<cand{i}>\n{candidate}\n</cand{i}>"
@@ -44,7 +52,7 @@ async def synthesize_result(
 ) -> LLMResult:
     """Run a synthesis pass over candidate responses."""
 
-    system, user = _build_synthesis_prompt(candidates)
+    system, user = build_synthesis_prompt(candidates)
     return await client.run(
         user,
         temperature=temperature,

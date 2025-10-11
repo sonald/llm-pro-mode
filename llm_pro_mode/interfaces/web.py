@@ -22,55 +22,23 @@ from ..models.schemas import (
     ProfileSelectRequest,
 )
 from ..core.processor import Processor, ProcessorHooks, RunContext, ProcessorResult
-from ..core.llm_client import LLMChunk, LLMResult
+from ..core.llm_client import LLMChunk, LLMResult, normalize_content
+from ..core.synthesizer import build_synthesis_prompt
 from ..logger import get_logger
 from ..tracing.logger import TraceLogger
-from .support import (
-    SimpleStatsCollector,
-    create_trace_logger,
-    delete_trace_file,
-    list_trace_metadata,
-    load_trace_content,
-)
+from .runtime_context import RuntimeContext
+from .support import SimpleStatsCollector, create_trace_logger
+from .trace_endpoints import register_trace_endpoints
 
 
 CancelledError = asyncio.CancelledError
 
-_runtime_state: Optional[RuntimeState] = None
+_runtime_context = RuntimeContext("Web")
 _logger = get_logger()
 
 
 def configure_runtime(state: RuntimeState) -> None:
-    global _runtime_state
-    _runtime_state = state
-
-
-def _require_state() -> RuntimeState:
-    if _runtime_state is None:
-        raise RuntimeError("Web interface runtime state not configured")
-    return _runtime_state
-
-
-def _current_config() -> Config:
-    return _require_state().config
-
-
-def _normalize_stream_content(value) -> str:
-    """Convert streamed reasoning/content payloads to plain text."""
-    if value is None or value == "":
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "".join(_normalize_stream_content(item) for item in value if item is not None)
-    if isinstance(value, dict):
-        for key in ("text", "content", "message"):
-            if key in value:
-                candidate = _normalize_stream_content(value[key])
-                if candidate:
-                    return candidate
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
+    _runtime_context.configure(state)
 
 
 def _profile_api_key_preview(value: Optional[str]) -> Optional[str]:
@@ -187,8 +155,8 @@ class WebSocketProgressTracker:
 
         task = self.tasks[task_id]
         task["progress"] = progress
-        normalized_thinking = _normalize_stream_content(thinking)
-        normalized_content = _normalize_stream_content(content)
+        normalized_thinking = normalize_content(thinking)
+        normalized_content = normalize_content(content)
 
         if normalized_thinking:
             task["thinking"] += normalized_thinking
@@ -220,8 +188,8 @@ class WebSocketProgressTracker:
         final_status = status or ("completed" if success else "failed")
         task["status"] = final_status
         task["progress"] = 100
-        normalized_thinking = _normalize_stream_content(thinking)
-        normalized_content = _normalize_stream_content(content)
+        normalized_thinking = normalize_content(thinking)
+        normalized_content = normalize_content(content)
         if normalized_thinking:
             task["thinking"] += normalized_thinking
         if normalized_content:
@@ -270,8 +238,8 @@ class WebSocketProgressTracker:
             final_status = status or ("completed" if success else "failed")
             task["status"] = final_status
             task["progress"] = 100
-            normalized_thinking = _normalize_stream_content(thinking)
-            normalized_content = _normalize_stream_content(content)
+            normalized_thinking = normalize_content(thinking)
+            normalized_content = normalize_content(content)
             if normalized_thinking:
                 task["thinking"] += normalized_thinking
             if normalized_content:
@@ -471,7 +439,7 @@ def create_web_app() -> FastAPI:
 
     def build_profile_response() -> ProfileListResponse:
         """Aggregate profile metadata for API responses."""
-        state = _require_state()
+        state = _runtime_context.require_state()
         manager = state.profile_manager
 
         config_file = manager.load_config()
@@ -503,7 +471,7 @@ def create_web_app() -> FastAPI:
     @app.post("/api/profiles/select", response_model=ProfileListResponse)
     async def select_profile(request: ProfileSelectRequest):
         """Apply a profile and optionally mark it as default."""
-        state = _require_state()
+        state = _runtime_context.require_state()
         success = state.apply_profile(request.name, make_default=request.make_default)
         if not success:
             raise HTTPException(status_code=404, detail="Profile not found")
@@ -516,42 +484,8 @@ def create_web_app() -> FastAPI:
         index_path = static_dir / "index.html"
         return FileResponse(index_path)
 
-    @app.get("/api/traces")
-    async def list_traces():
-        """List all trace files with metadata."""
-        config = _require_state().config
-        traces = list_trace_metadata(config, logger=_logger)
-        return JSONResponse(content={"traces": traces})
-
-    @app.get("/api/traces/{filename}")
-    async def get_trace(filename: str):
-        """Get specific trace file content."""
-        config = _require_state().config
-        try:
-            data = load_trace_content(config, filename, logger=_logger)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="Trace file not found")
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to read trace: {exc}")
-
-        return JSONResponse(content=data)
-
-    @app.delete("/api/traces/{filename}")
-    async def delete_trace(filename: str):
-        """Delete a specific trace file."""
-        config = _require_state().config
-        try:
-            delete_trace_file(config, filename, logger=_logger)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="Trace file not found")
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to delete trace: {exc}")
-
-        return JSONResponse(content={"success": True, "message": "Trace deleted"})
+    # Register shared trace management endpoints
+    register_trace_endpoints(app, _runtime_context.get_config)
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
@@ -634,7 +568,7 @@ async def handle_completion_request(connection_id: str, session_id: str, request
     trace_compact = request_data.get("trace_compact", True)
 
     trace_logger = create_trace_logger(
-        _current_config(),
+        _runtime_context.get_config(),
         enabled=enable_trace,
         compact_mode=trace_compact,
     )
@@ -682,7 +616,7 @@ async def process_main_with_websocket(
 ) -> str:
     """Process completion with WebSocket progress updates using the processor."""
 
-    config = _current_config()
+    config = _runtime_context.get_config()
     hooks_adapter = WebProcessorHooksAdapter(progress_tracker)
     processor = Processor(config, hooks=hooks_adapter.make_hooks())
 
@@ -728,33 +662,14 @@ async def synthesize_result_websocket(
     trace_id: Optional[str] = None,
 ) -> str:
     """Synthesize multiple candidate results using WebSocket streaming."""
-    config = _current_config()
+    config = _runtime_context.get_config()
     from ..core.llm_client import call_llm_streaming
 
     try:
         _logger.debug(f"Synthesis: Processing {len(candidates)} candidates")
 
-        # Create synthesis prompt
-        numbered = "\n\n".join(
-            [
-                f"<cand{i}>\n{candidate}\n</cand{i}>"
-                for i, candidate in enumerate(candidates)
-            ]
-        )
-
-        system_prompt = (
-            "You are an expert editor. Synthesize ONE best answer from the candidate "
-            "answers provided, merging strengths, correcting errors, and removing repetition. "
-            "Do not mention the candidates or the synthesis process. Be decisive and clear."
-        )
-
-        user_prompt = f"""
-        You are given {len(candidates)} candidate answers delimited by tags.
-
-        {numbered}
-
-        Return the single best final answer.
-        """
+        # Build synthesis prompts using shared function
+        system_prompt, user_prompt = build_synthesis_prompt(candidates)
 
         # Start task trace
         task_trace = None
@@ -785,7 +700,7 @@ async def synthesize_result_websocket(
             metadata={"phase": "synthesis"},
             config=config,
         ):
-            normalized_content = _normalize_stream_content(content)
+            normalized_content = normalize_content(content)
 
             if chunk_type == "thinking":
                 thinking_content += normalized_content

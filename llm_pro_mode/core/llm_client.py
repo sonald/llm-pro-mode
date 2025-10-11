@@ -218,7 +218,7 @@ class LLMClient:
                     reasoning_payload = getattr(delta, "reasoning")
 
                 if reasoning_payload is not None:
-                    normalized_reasoning = _normalize_reasoning_payload(reasoning_payload)
+                    normalized_reasoning = normalize_content(reasoning_payload)
                     if normalized_reasoning:
                         thinking_count += count_tokens(
                             normalized_reasoning, model_name=self.model_name
@@ -305,20 +305,31 @@ class LLMClient:
         return self.default_temperature
 
 
-def _normalize_reasoning_payload(value: Any) -> str:
-    """Normalize reasoning/content payloads to plain text."""
+def normalize_content(value: Any) -> str:
+    """Normalize reasoning/content payloads to plain text.
+
+    Handles various LLM response formats including nested structures,
+    lists, and dictionaries. Recursively extracts text content from
+    common field names (text, content, message).
+
+    Args:
+        value: The value to normalize (str, list, dict, or other)
+
+    Returns:
+        Normalized string content
+    """
     if value is None or value == "":
         return ""
     if isinstance(value, str):
         return value
     if isinstance(value, list):
         return "".join(
-            _normalize_reasoning_payload(item) for item in value if item is not None
+            normalize_content(item) for item in value if item is not None
         )
     if isinstance(value, dict):
         for key in ("text", "content", "message"):
             if key in value:
-                candidate = _normalize_reasoning_payload(value[key])
+                candidate = normalize_content(value[key])
                 if candidate:
                     return candidate
         return json.dumps(value, ensure_ascii=False)
