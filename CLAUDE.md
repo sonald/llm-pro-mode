@@ -4,272 +4,338 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-LLM Pro Mode is a modular Python application that provides multiple interfaces (CLI, TUI, and FastAPI server) for running parallel LLM completions and synthesizing results. The project follows a clean, modular architecture with separated concerns.
+LLM Pro Mode is a modular Python application providing **four interface modes** (CLI, TUI, Web UI, and Desktop) for parallel LLM completions with result synthesis. The architecture emphasizes clean separation of concerns, structured concurrency, and flexible configuration.
 
 ## Architecture
 
-### Modular Package Structure
+### Package Structure
 
 ```
 llm_pro_mode/
-├── __init__.py              # Package initialization
-├── main.py                  # Main entry point and CLI argument parsing
-├── config.py                # Configuration management and global state
-├── profile_manager.py       # JSON profile configuration system
-├── core/                    # Core business logic
-│   ├── __init__.py
+├── main.py                  # Entry point and CLI argument parsing
+├── config/                  # Configuration system
+│   ├── __init__.py          # Core Config dataclass
+│   └── runtime.py           # RuntimeState and ConfigLoader
+├── profile_manager.py       # JSON profile configuration
+├── core/                    # Business logic
 │   ├── llm_client.py        # LLM API calls and streaming
-│   ├── synthesizer.py       # Result synthesis logic
-│   └── processor.py         # Main processing coordination
-├── tracing/                 # Debugging and logging
-│   ├── __init__.py
-│   ├── logger.py            # TraceLogger for debugging
-│   └── yaml_dumper.py       # Custom YAML serialization
-├── interfaces/              # User interfaces
-│   ├── __init__.py
-│   ├── api.py              # FastAPI web server
+│   ├── synthesizer.py       # Result synthesis
+│   └── processor.py         # Parallel execution coordination
+├── interfaces/              # UI implementations
 │   ├── cli.py              # Command-line interface
-│   └── tui.py              # Terminal user interface
-└── models/                 # Data models
-    ├── __init__.py
-    └── schemas.py          # Pydantic models
+│   ├── tui.py              # Terminal UI (Textual)
+│   ├── web.py              # Web UI (FastAPI + WebSocket)
+│   ├── api.py              # RESTful API server
+│   ├── support.py          # Shared interface utilities
+│   └── static/             # Web UI assets (HTML/CSS/JS)
+├── tracing/                # Debug logging
+│   ├── logger.py           # TraceLogger for debugging
+│   └── yaml_dumper.py      # YAML serialization
+├── models/                 # Data models
+│   └── schemas.py          # Pydantic models
+└── utils/                  # Utilities
+    └── tokens.py           # Token counting
 ```
 
-### Design Principles
+### Key Design Patterns
 
-**Separation of Concerns**: Each module has a single responsibility:
-- `config.py`: Centralized configuration management with environment variable and CLI argument support
-- `profile_manager.py`: JSON-based configuration profiles with multi-location file resolution
-- `core/`: Business logic and LLM processing
-- `interfaces/`: User interaction layers
-- `tracing/`: Debugging and logging utilities
-- `models/`: Data structures and validation
+**RuntimeState and ConfigLoader**: Configuration assembly happens in `config/runtime.py` using `RuntimeState` (holds config + profile manager) and `ConfigLoader` (builds state from CLI args + environment + profiles). This pattern enables dependency injection and testability.
 
-**Dependency Injection**: Global state is managed through the config module, eliminating global variables and improving testability.
+**Processor with Hooks**: `core/processor.py` uses `ProcessorHooks` dataclass for progress callbacks, enabling different interfaces to track parallel execution without tight coupling.
 
-**Flexible Configuration**: Multi-layer configuration system supporting environment variables, JSON profiles, and command-line arguments with clear precedence rules.
+**Multi-Interface Architecture**: Four modes share core logic:
+- **CLI** (`--prompt`): Rich progress bars, stdout output
+- **TUI** (`--tui`): Textual-based interactive terminal
+- **Web UI** (`--web`): Modern web interface with WebSocket streaming
+- **API Server** (`--serve`): RESTful endpoints for integration
 
-**Multi-Interface Design**: Three distinct modes of operation:
-- CLI mode: Direct command-line execution with progress bars
-- TUI mode: Interactive terminal interface using Textual framework
-- Server mode: FastAPI web server for HTTP API access
-
-**Parallel Processing**: Uses `anyio` task groups to run multiple LLM calls concurrently, then synthesizes results using a separate LLM call.
+**Parallel Processing**: Uses `anyio.create_task_group()` for structured concurrency - spawns N parallel LLM calls, collects results, then synthesizes using a separate call with different temperature.
 
 ## Development Commands
 
-### Installation and Setup
+### Installation
 
-**Install as package** (recommended for development):
 ```bash
+# Development installation
 pip install -e .
-```
 
-**Direct module execution**:
-```bash
-python -m llm_pro_mode.main
-```
-
-**Direct script execution** (without installation):
-```bash
-python llm_pro.py
+# Verify installation
+llm-pro-mode --help
 ```
 
 ### Running the Application
 
-**CLI Mode (default)**:
+**CLI Mode**:
 ```bash
-llm-pro-mode --prompt "Your prompt here" --model "model-name"
-# or
-python -m llm_pro_mode.main --prompt "Your prompt here" --model "model-name"
+llm-pro-mode --prompt "Your prompt" --model "gpt-4"
+llm-pro-mode -p "Question" -m "claude-3-sonnet" -n 5
+llm-pro-mode -p - < input.txt  # stdin support
 ```
 
-**Terminal UI Mode**:
+**TUI Mode** (interactive terminal):
 ```bash
 llm-pro-mode --tui
-# or
-python -m llm_pro_mode.main --tui
+llm-pro-mode --tui --n_runs 5 --trace
 ```
 
-**Server Mode**:
+**Web UI Mode** (ChatGPT-style interface):
 ```bash
-llm-pro-mode --serve --port 8000
-# or
-python -m llm_pro_mode.main --serve --port 8000
+llm-pro-mode --web --port 8000
+# Open browser to http://localhost:8000
 ```
+
+**API Server Mode** (RESTful endpoints):
+```bash
+llm-pro-mode --serve --port 8080
+```
+
+**Desktop App** (Tauri wrapper):
+```bash
+cd desktop
+cargo tauri dev      # Development mode
+cargo tauri build    # Production build
+```
+
+### Testing
+
+```bash
+# Run all tests
+pytest
+
+# Run specific test file
+pytest tests/test_integration.py
+
+# Run with verbose output
+pytest -v
+
+# Run async tests
+pytest tests/test_llm_streaming.py
+```
+
+### Profile Management
+
+Configuration priority: CLI args > JSON profiles > Environment variables > Defaults
+
+```bash
+# Profile operations
+llm-pro-mode --list-profiles
+llm-pro-mode --show-profile openai
+llm-pro-mode --save-profile my-config --model "gpt-4" --api_base "https://api.openai.com/v1"
+llm-pro-mode --set-default-profile openai
+llm-pro-mode --delete-profile old-config
+
+# Use profile
+llm-pro-mode --profile grok --prompt "Question"
+```
+
+**Config file locations** (checked in order):
+1. `./llm_pro_config.json`
+2. `~/.llm-pro-mode/config.json`
+3. `./config.json`
+
+### Debug Tracing
+
+```bash
+# Enable trace logging
+llm-pro-mode --trace --prompt "test"
+
+# Compact trace mode
+llm-pro-mode --trace --trace_compact --prompt "test"
+
+# Custom trace directory
+llm-pro-mode --trace --trace_dir ./debug_traces --prompt "test"
+```
+
+### Syntax Checking
+
+```bash
+# Check Python syntax
+python -m compileall llm_pro_mode
+
+# Type checking (if mypy installed)
+mypy llm_pro_mode
+```
+
+## Configuration System
 
 ### Environment Variables
 
-Set these environment variables or pass as arguments:
-- `LLM_PRO_MODEL`: Default model name
-- `LLM_PRO_API_BASE`: API base URL
-- `LLM_PRO_API_KEY`: API key
-
-### Profile Management System
-
-The application includes a JSON-based profile management system that allows saving and reusing different API configurations:
-
-**Configuration file locations** (checked in order):
-1. `./llm_pro_config.json` (project-local config)
-2. `~/.llm-pro-mode/config.json` (user config)
-3. `./config.json` (fallback)
-
-**Profile commands**:
 ```bash
-# List all available profiles
-llm-pro-mode --list-profiles
+export LLM_PRO_MODEL="gpt-4"
+export LLM_PRO_API_BASE="https://api.openai.com/v1"
+export LLM_PRO_API_KEY="sk-..."
 
-# Show specific profile details
-llm-pro-mode --show-profile openai
+# Sampling parameters
+export LLM_PRO_TEMPERATURE=0.8
+export LLM_PRO_SYNTH_TEMPERATURE=0.3
+export LLM_PRO_MAX_TOKENS=1200
 
-# Use a specific profile
-llm-pro-mode --profile grok --prompt "Your prompt here"
-
-# Save current configuration as a new profile
-llm-pro-mode --save-profile my-config --model "gpt-4" --api_base "https://api.openai.com/v1"
-
-# Set default profile
-llm-pro-mode --set-default-profile openai
-
-# Delete a profile
-llm-pro-mode --delete-profile old-config
+# Desktop app Python interpreter
+export LLM_PRO_PYTHON="$HOME/.pyenv/versions/3.11.7/bin/python"
 ```
 
-**Configuration priority** (highest to lowest):
-1. Command line arguments
-2. JSON profile configuration
-3. Environment variables
-4. Default values
+### API Key Resolution
 
-### Stdin Support
-
-The CLI mode supports reading prompts from stdin:
-```bash
-# Read from stdin with '-' flag
-echo "Explain machine learning" | llm-pro-mode -p -
-
-# Read from file via stdin
-llm-pro-mode -p - < input.txt
-
-# Interactive stdin input
-llm-pro-mode --prompt -
-# (then type your prompt and press Ctrl+D)
+Profile `api_key` fields support environment variable names:
+```json
+{
+  "profiles": {
+    "openai": {
+      "api_key": "OPENAI_API_KEY",  // Resolved from env at runtime
+      "model_name": "gpt-4",
+      "api_base": "https://api.openai.com/v1"
+    }
+  }
+}
 ```
 
-### Testing and Debug
+### Command-Line Parameters
 
-**Enable trace logging**:
 ```bash
-python llm-pro-mode.py --trace --prompt "test"
+--model, -m          # Model name
+--api_base, -b       # API base URL
+--api_key, -k        # API key or env var name
+--prompt, -p         # Input prompt (or '-' for stdin)
+--n_runs, -n         # Parallel runs (default: 3)
+--temperature        # Sampling temperature
+--synthesis_temperature  # Temperature for synthesis step
+--max_tokens         # Max tokens per request
+--profile            # Profile name to use
+--port, -P           # Server/Web UI port
+--serve              # API server mode
+--web                # Web UI mode
+--tui                # Terminal UI mode
+--trace, -t          # Enable trace logging
+--trace_dir          # Trace output directory
+--trace_compact, --tc  # Compact trace format
 ```
 
-**Compact trace mode**:
+## Code Architecture Details
+
+### Configuration Assembly (`config/runtime.py`)
+
+**RuntimeState**: Holds `Config` + `ProfileManager` + API key source tracking. Provides methods for profile operations, environment application, and CLI override merging.
+
+**ConfigLoader**: Orchestrates configuration loading:
+1. Load `.env` file
+2. Initialize ProfileManager
+3. Create RuntimeState
+4. Apply profile (requested or default)
+5. Apply environment variables
+6. Apply CLI argument overrides
+
+### Parallel Execution (`core/processor.py`)
+
+**Processor.run()** workflow:
+1. Create task group with `anyio.create_task_group()`
+2. Spawn N parallel `_execute_single_run()` tasks
+3. Collect results via shared `run_outputs` list
+4. Handle interruption (Ctrl+C) gracefully
+5. If multiple successful results, call `_run_synthesis()`
+6. Return `ProcessorResult` with final/partial text
+
+**ProcessorHooks**: Optional callbacks for progress tracking:
+- `run_start`, `run_chunk`, `run_complete`, `run_error`
+- `synthesis_start`, `synthesis_chunk`, `synthesis_complete`, `synthesis_error`
+- `cancelled`
+
+### Interface Integration
+
+**CLI** (`interfaces/cli.py`): Rich progress bars, synchronous wrapper, stdout output
+
+**TUI** (`interfaces/tui.py`): Textual widgets, reactive UI, Emacs-style keybindings
+
+**Web UI** (`interfaces/web.py`): FastAPI + WebSocket, real-time task monitoring, ChatGPT-style interface with streaming
+
+**API** (`interfaces/api.py`): RESTful `/completion` endpoint, trace file management endpoints
+
+### WebSocket Protocol (Web UI)
+
+Message types:
+- `task_started`: Parallel run begins
+- `task_progress`: Chunk received (with thinking/content/progress%)
+- `task_completed`: Run finished
+- `synthesis_started`: Synthesis begins
+- `synthesis_chunk`: Synthesis streaming
+- `synthesis_complete`: Synthesis done
+- `final_result`: Complete response
+- `error`: Error occurred
+
+### Trace Logging
+
+**TraceLogger** (`tracing/logger.py`): Optional debug logger that captures:
+- Request/response pairs
+- Streaming chunks
+- Token counts and timing
+- Run-level and synthesis-level traces
+
+**YAML Output** (`tracing/yaml_dumper.py`): Custom YAML serialization handling multiline strings and special characters for human-readable trace files.
+
+## Desktop Application (Tauri)
+
+Located in `desktop/` directory. Tauri app automatically:
+- Starts FastAPI backend on random available port
+- Opens native window with embedded Web UI
+- Terminates backend process on app close
+
+**Prerequisites**:
+- Rust (2021 edition)
+- `cargo` and `tauri-cli`
+- Python environment accessible via `python3` or `LLM_PRO_PYTHON`
+
+**Development**:
 ```bash
-python llm-pro-mode.py --trace --trace_compact --prompt "test"
+cd desktop
+cargo tauri dev
 ```
 
-### Dependencies
-
-The project dependencies are defined in `pyproject.toml` and include:
-- `anyio`: Async concurrency framework
-- `python-dotenv`: Environment variable loading
-- `fastapi`: Web API framework
-- `litellm`: LLM API integration
-- `pydantic`: Data validation
-- `rich`: Terminal output formatting
-- `textual`: Terminal UI framework
-- `uvicorn`: ASGI server
-- `pyyaml`: YAML serialization
-
-Install dependencies with:
+**Production Build**:
 ```bash
-pip install -e .
+cd desktop
+cargo tauri build
+# Outputs in desktop/src-tauri/target/release/bundle/
 ```
 
-## Configuration
+## Common Development Tasks
 
-### Command-Line Options
+### Adding a New Interface Mode
 
-- `--model, -m`: LLM model name
-- `--api_base, -b`: API base URL
-- `--api_key, -k`: API key
-- `--prompt, -p`: Input prompt (CLI mode)
-- `--n_runs, -n`: Number of parallel runs (default: 3)
-- `--port, -P`: Server port (default: 8000)
-- `--serve`: Enable server mode
-- `--tui`: Enable terminal UI mode
-- `--trace, -t`: Enable trace logging
-- `--trace_dir`: Trace output directory
-- `--trace_compact, --tc`: Use compact trace format
+1. Create new file in `interfaces/`
+2. Implement `ProcessorHooks` for progress tracking
+3. Initialize `Processor` with hooks
+4. Call `processor.run()` with prompt and config
+5. Add mode flag to `main.py` argument parser
+6. Add conditional in `main.py` to launch new interface
 
-### TUI Key Bindings
+### Modifying Parallel Execution Logic
 
-- `Ctrl+J`: Submit prompt
-- `Enter`: New line in input
-- `Ctrl+C/Q`: Quit
-- `Ctrl+L`: Clear results
-- `↑↓/PgUp/PgDn`: Scroll results
-- Emacs-style editing: `Ctrl+A/E`, `Ctrl+P/N`, `Ctrl+K`
+Edit `core/processor.py`:
+- `Processor._execute_single_run()`: Individual run logic
+- `Processor._run_synthesis()`: Synthesis step
+- `ProcessorHooks`: Add new callback types
 
-## Code Patterns
+### Adding Configuration Options
 
-### Modular Architecture
+1. Add field to `Config` dataclass in `config/__init__.py`
+2. Add environment variable parsing in `RuntimeState.apply_environment()`
+3. Add CLI argument in `main.py`
+4. Add override in `RuntimeState.apply_overrides_from_args()`
+5. Update profile schema in `profile_manager.py` if needed
 
-The application follows clean architecture principles:
-- **Config Module**: Centralized configuration using dataclasses with environment variable support
-- **Dependency Injection**: Configuration and trace loggers are passed as parameters rather than using global state
-- **Interface Separation**: Each UI mode (CLI, TUI, API) is implemented in separate modules
-- **Core Logic Isolation**: Business logic is separated from interface concerns
+### Extending Web UI
 
-### Async Task Management
+Edit files in `interfaces/static/`:
+- `index.html`: Layout and structure
+- `style.css`: Styling and themes
+- `app.js`: WebSocket client and UI logic
 
-The application uses `anyio.create_task_group()` for structured concurrency in `core/processor.py`, spawning multiple LLM calls in parallel and collecting results.
+Add WebSocket message types in `interfaces/web.py` and `models/schemas.py`.
 
-### Progress Tracking
+## Testing Strategy
 
-Multiple progress tracking implementations:
-- Rich-based progress bars for CLI mode (`interfaces/cli.py`)
-- Custom TUI progress widgets for terminal interface (`interfaces/tui.py`)
-- Status tracking for API mode (`interfaces/api.py`)
+- **Unit tests**: Individual modules (`test_llm_client_core.py`)
+- **Integration tests**: End-to-end flows (`test_integration.py`)
+- **Streaming tests**: Async stream handling (`test_llm_streaming.py`)
+- **WebSocket tests**: Real-time communication (`test_websocket_manager.py`)
 
-### Error Handling
-
-Comprehensive error handling with optional trace logging integration:
-- TraceLogger instances are created per operation when needed
-- Failed tasks are properly recorded and don't break the synthesis process
-- Each interface handles errors appropriately for its context
-
-### Configuration Management
-
-The `config.py` module provides:
-- Dataclass-based configuration with type hints
-- Environment variable loading with `.env` support
-- Command-line argument integration
-- Global configuration instance for easy access
-
-### YAML Trace Format
-
-Custom YAML dumper in `tracing/yaml_dumper.py` handles multiline strings and special characters properly, creating human-readable trace files for debugging.
-
-## Testing and Development
-
-### Module Testing
-
-Each module can be tested independently:
-```bash
-# Test core functionality
-python -c "from llm_pro_mode.core.processor import main; print('Core module loaded')"
-
-# Test configuration
-python -c "from llm_pro_mode.config import config; print(f'Config: {config.model_name}')"
-
-# Test interfaces
-python -c "from llm_pro_mode.interfaces.api import app; print('API module loaded')"
-```
-
-### Development Workflow
-
-1. Install in development mode: `pip install -e .`
-2. Make changes to specific modules
-3. Test with: `llm-pro-mode --help`
-4. Run in desired mode: CLI, TUI, or server
+Uses `pytest` with `pytest-asyncio` for async test support.

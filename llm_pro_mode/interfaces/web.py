@@ -101,7 +101,7 @@ class WebSocketManager:
         """Accept WebSocket connection."""
         await websocket.accept()
         self.active_connections[connection_id] = websocket
-        print(f"WebSocket connection established: {connection_id}")
+        _logger.debug(f"WebSocket connection established: {connection_id}")
 
     def disconnect(self, connection_id: str):
         """Remove WebSocket connection."""
@@ -112,7 +112,7 @@ class WebSocketManager:
             del self.active_connections[connection_id]
         if connection_id in self.connection_tasks:
             del self.connection_tasks[connection_id]
-        print(f"WebSocket connection closed: {connection_id}")
+        _logger.debug(f"WebSocket connection closed: {connection_id}")
 
     def set_active_job(self, connection_id: str, job: Optional[asyncio.Task]):
         """Track the active job for a connection."""
@@ -133,7 +133,7 @@ class WebSocketManager:
             try:
                 await self.active_connections[connection_id].send_text(json.dumps(message))
             except Exception as e:
-                print(f"Error sending message to {connection_id}: {e}")
+                _logger.warning(f"Error sending message to {connection_id}: {e}")
                 self.disconnect(connection_id)
 
     async def broadcast_to_session(self, session_id: str, message: dict):
@@ -143,7 +143,7 @@ class WebSocketManager:
                 try:
                     await websocket.send_text(json.dumps(message))
                 except Exception as e:
-                    print(f"Error broadcasting to {conn_id}: {e}")
+                    _logger.warning(f"Error broadcasting to {conn_id}: {e}")
                     self.disconnect(conn_id)
 
 
@@ -182,7 +182,7 @@ class WebSocketProgressTracker:
     async def update_task_progress(self, task_id: str, progress: float, thinking: str = "", content: str = ""):
         """Update task progress."""
         if task_id not in self.tasks:
-            print(f"[DEBUG] Task {task_id} not found in tasks: {list(self.tasks.keys())}")
+            _logger.debug(f"Task {task_id} not found in tasks: {list(self.tasks.keys())}")
             return
 
         task = self.tasks[task_id]
@@ -194,11 +194,6 @@ class WebSocketProgressTracker:
             task["thinking"] += normalized_thinking
         if normalized_content:
             task["content"] += normalized_content
-
-        # Debug logging for synthesis task
-        if task_id == "synthesis":
-            print(f"[DEBUG] Synthesis task update - progress: {progress}, thinking_len: {len(normalized_thinking)}, content_len: {len(normalized_content)}")
-            print(f"[DEBUG] Synthesis task total - thinking_len: {len(task['thinking'])}, content_len: {len(task['content'])}")
 
         await self.manager.send_message(self.connection_id, {
             "type": "task_progress",
@@ -599,7 +594,7 @@ def create_web_app() -> FastAPI:
                         except CancelledError:
                             pass
                         except Exception as exc:  # pragma: no cover - diagnostic logging only
-                            print(f"WebSocket task error: {exc}")
+                            _logger.error(f"WebSocket task error: {exc}")
 
                     current_job.add_done_callback(_finalize)
 
@@ -615,7 +610,7 @@ def create_web_app() -> FastAPI:
         except WebSocketDisconnect:
             ws_manager.disconnect(connection_id)
         except Exception as e:
-            print(f"WebSocket error: {e}")
+            _logger.error(f"WebSocket error: {e}")
             await ws_manager.send_message(connection_id, {
                 "type": "error",
                 "message": f"Server error: {str(e)}"
@@ -659,7 +654,7 @@ async def handle_completion_request(connection_id: str, session_id: str, request
             # Save trace to file
             if trace_logger.traces:
                 saved_path = trace_logger.save_traces()
-                print(f"Trace saved to: {saved_path}")
+                _logger.info(f"Trace saved to: {saved_path}")
                 stats = trace_logger.get_stats()
         else:
             # Use basic stats collected during execution
@@ -672,7 +667,7 @@ async def handle_completion_request(connection_id: str, session_id: str, request
         await progress_tracker.cancel_active_tasks(reason)
         await progress_tracker.send_cancellation(reason)
     except Exception as e:
-        print(f"Error processing completion request: {e}")
+        _logger.error(f"Error processing completion request: {e}")
         await ws_manager.send_message(connection_id, {
             "type": "error",
             "message": f"Processing error: {str(e)}"
@@ -737,7 +732,7 @@ async def synthesize_result_websocket(
     from ..core.llm_client import call_llm_streaming
 
     try:
-        print(f"[DEBUG] Synthesis: Processing {len(candidates)} candidates")
+        _logger.debug(f"Synthesis: Processing {len(candidates)} candidates")
 
         # Create synthesis prompt
         numbered = "\n\n".join(
@@ -774,7 +769,7 @@ async def synthesize_result_websocket(
                 },
             )
 
-        print(f"[DEBUG] Synthesis: Starting streaming call")
+        _logger.debug("Synthesis: Starting streaming call")
 
         # Make streaming call for synthesis
         thinking_content = ""
@@ -791,8 +786,6 @@ async def synthesize_result_websocket(
             config=config,
         ):
             normalized_content = _normalize_stream_content(content)
-            preview = normalized_content[:50]
-            print(f"[DEBUG] Synthesis received {chunk_type}: {preview}...")
 
             if chunk_type == "thinking":
                 thinking_content += normalized_content
@@ -815,12 +808,12 @@ async def synthesize_result_websocket(
                 )
 
             elif chunk_type == "error":
-                print(f"[DEBUG] Synthesis error: {normalized_content}")
+                _logger.warning(f"Synthesis error: {normalized_content}")
                 # Don't re-raise, just handle gracefully
                 # The error content will be empty, which is fine
                 break
 
-        print(f"[DEBUG] Synthesis: Completed with {len(response_content)} chars")
+        _logger.debug(f"Synthesis: Completed with {len(response_content)} chars")
 
         # Complete task trace
         if trace_logger and task_trace:
@@ -836,7 +829,7 @@ async def synthesize_result_websocket(
         return response_content
 
     except CancelledError:
-        print(f"[DEBUG] Synthesis cancelled")
+        _logger.debug("Synthesis cancelled")
         if trace_logger and task_trace:
             trace_logger.finish_task(task_trace, success=False, error_msg="Cancelled")
 
@@ -850,7 +843,7 @@ async def synthesize_result_websocket(
         raise
 
     except Exception as e:
-        print(f"[DEBUG] Synthesis exception: {e}")
+        _logger.error(f"Synthesis exception: {e}")
         if trace_logger and task_trace:
             trace_logger.finish_task(task_trace, success=False, error_msg=str(e))
 

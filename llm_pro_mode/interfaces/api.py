@@ -71,8 +71,6 @@ async def list_traces():
     """List all trace files with metadata."""
     state = _require_state()
     config = state.config
-    trace_dir = Path(config.trace_dir)
-
     traces = list_trace_metadata(config, logger=_logger)
     return JSONResponse(content={"traces": traces})
 
