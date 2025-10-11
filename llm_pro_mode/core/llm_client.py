@@ -144,6 +144,15 @@ class LLMClient:
             metadata=metadata or {},
         )
 
+        return await self.gather_result(request, on_chunk=on_chunk)
+
+    async def gather_result(
+        self,
+        request: LLMRequest,
+        *,
+        on_chunk: Optional[Callable[[LLMChunk], None]] = None,
+    ) -> LLMResult:
+        """Gather streamed chunks into a final result."""
         parts: list[str] = []
         finish_reason: Optional[str] = None
         token_count = 0
@@ -153,29 +162,6 @@ class LLMClient:
             finish_reason = chunk.finish_reason or finish_reason
             if on_chunk:
                 on_chunk(chunk)
-
-            if chunk.kind == "thinking":
-                thinking_count = chunk.thinking_count
-            elif chunk.kind == "content":
-                parts.append(chunk.text)
-                token_count = chunk.token_count
-
-        return LLMResult(
-            content="".join(parts),
-            finish_reason=finish_reason,
-            token_count=token_count,
-            thinking_count=thinking_count,
-        )
-
-    async def gather_result(self, request: LLMRequest) -> LLMResult:
-        """Compatibility helper that gathers chunks into a final result."""
-        parts: list[str] = []
-        finish_reason: Optional[str] = None
-        token_count = 0
-        thinking_count = 0
-
-        async for chunk in self.stream_chunks(request):
-            finish_reason = chunk.finish_reason or finish_reason
             if chunk.kind == "thinking":
                 thinking_count = chunk.thinking_count
             elif chunk.kind == "content":
