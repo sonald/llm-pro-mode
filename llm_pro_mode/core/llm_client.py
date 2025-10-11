@@ -8,11 +8,12 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Callable, Dict, Literal, Optional, Tuple
 
-from litellm import acompletion, token_counter
+from litellm import acompletion
 
 from ..config import Config
 from ..logger import error as log_error
 from ..tracing.logger import TraceLogger
+from ..utils.tokens import count_tokens
 
 
 @dataclass(slots=True)
@@ -219,7 +220,9 @@ class LLMClient:
                 if reasoning_payload is not None:
                     normalized_reasoning = _normalize_reasoning_payload(reasoning_payload)
                     if normalized_reasoning:
-                        thinking_count += _count_tokens(normalized_reasoning, self.model_name)
+                        thinking_count += count_tokens(
+                            normalized_reasoning, model_name=self.model_name
+                        )
                         trace.log_thinking(normalized_reasoning)
                         yield LLMChunk(
                             kind="thinking",
@@ -230,7 +233,9 @@ class LLMClient:
                         )
 
                 if hasattr(delta, "content") and delta.content:
-                    token_count += _count_tokens(delta.content, self.model_name)
+                    token_count += count_tokens(
+                        delta.content, model_name=self.model_name
+                    )
                     trace.log_content(delta.content)
                     yield LLMChunk(
                         kind="content",
@@ -318,17 +323,6 @@ def _normalize_reasoning_payload(value: Any) -> str:
                     return candidate
         return json.dumps(value, ensure_ascii=False)
     return str(value)
-
-
-def _count_tokens(text: str, model_name: str) -> int:
-    """Count tokens for the provided text with graceful fallback."""
-    if not text:
-        return 0
-
-    try:
-        return int(token_counter(model=model_name, text=text))
-    except Exception:
-        return max(1, len(text) // 4)
 
 
 TRANSIENT_STREAM_ERRORS: Tuple[type[BaseException], ...] = (
