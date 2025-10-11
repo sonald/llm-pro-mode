@@ -5,11 +5,10 @@ import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
-console = Console()
+from .logger import console, error, warning
 
 
 @dataclass
@@ -133,7 +132,7 @@ class ProfileManager:
     def load_config(self) -> ConfigFile:
         """Load configuration from file, create default if doesn't exist."""
         if not self.config_path.exists():
-            console.print(f"[yellow]配置文件不存在，创建默认配置: {self.config_path}[/yellow]")
+            warning("配置文件不存在，创建默认配置: %s", self.config_path)
             self.config_file = self._create_default_config()
             self.save_config()
             return self.config_file
@@ -144,8 +143,8 @@ class ProfileManager:
             self.config_file = ConfigFile.from_dict(data)
             return self.config_file
         except (json.JSONDecodeError, KeyError, TypeError) as e:
-            console.print(f"[red]配置文件格式错误: {e}[/red]")
-            console.print(f"[yellow]使用默认配置替换[/yellow]")
+            error("配置文件格式错误: %s", e)
+            warning("使用默认配置替换")
             self.config_file = self._create_default_config()
             return self.config_file
 
@@ -162,7 +161,7 @@ class ProfileManager:
                 json.dump(self.config_file.to_dict(), f, indent=2, ensure_ascii=False)
             return True
         except Exception as e:
-            console.print(f"[red]保存配置文件失败: {e}[/red]")
+            error("保存配置文件失败: %s", e)
             return False
 
     def get_profile(self, profile_name: str) -> Optional[ProfileConfig]:
@@ -196,12 +195,12 @@ class ProfileManager:
             self.load_config()
 
         if name not in self.config_file.profiles:
-            console.print(f"[red]Profile '{name}' 不存在[/red]")
+            error("Profile '%s' 不存在", name)
             return False
 
         # Don't delete if it's the default profile
         if name == self.config_file.default_profile:
-            console.print(f"[red]不能删除默认 profile '{name}'[/red]")
+            error("不能删除默认 profile '%s'", name)
             return False
 
         del self.config_file.profiles[name]
@@ -213,7 +212,7 @@ class ProfileManager:
             self.load_config()
 
         if name not in self.config_file.profiles:
-            console.print(f"[red]Profile '{name}' 不存在[/red]")
+            error("Profile '%s' 不存在", name)
             return False
 
         self.config_file.default_profile = name
@@ -251,7 +250,7 @@ class ProfileManager:
         """Show detailed profile information."""
         profile = self.get_profile(name)
         if not profile:
-            console.print(f"[red]Profile '{name}' 不存在[/red]")
+            error("Profile '%s' 不存在", name)
             return
 
         # Mask API key for security

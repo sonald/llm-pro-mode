@@ -10,7 +10,9 @@ from textual import events
 from rich.text import Text
 from rich.markdown import Markdown
 
-from ..core.processor import main
+from ..config import Config
+from ..core.processor import Processor, ProcessorHooks, RunContext, ProcessorResult
+from ..core.llm_client import LLMChunk, LLMResult
 from ..tracing.logger import TraceLogger
 
 
@@ -117,11 +119,12 @@ class LLMProTUI(App):
         Binding("ctrl+h", "delete_left", "Delete Left", show=False),
     ]
 
-    def __init__(self, n_runs: int = 3, enable_trace: bool = False, trace_compact: bool = False):
+    def __init__(self, config: Config):
         super().__init__()
-        self.n_runs = n_runs
-        self.enable_trace = enable_trace
-        self.trace_compact = trace_compact
+        self.config = config
+        self.n_runs = config.n_runs
+        self.enable_trace = config.trace_enabled
+        self.trace_compact = config.trace_compact
         self.current_tasks = {}  # Store task progress info: {task_name: {"progress": ProgressBar, "label": Label}}
         self.results_log = None
         self.progress_container = None
@@ -184,6 +187,61 @@ class LLMProTUI(App):
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
+    def _task_name(self, context: RunContext) -> str:
+        return f"Run {context.index + 1}"
+
+    def _build_hooks(self) -> ProcessorHooks:
+        return ProcessorHooks(
+            run_start=self._on_run_start,
+            run_chunk=self._on_run_chunk,
+            run_complete=self._on_run_complete,
+            run_error=self._on_run_error,
+            synthesis_start=self._on_synthesis_start,
+            synthesis_chunk=self._on_synthesis_chunk,
+            synthesis_complete=self._on_synthesis_complete,
+            synthesis_error=self._on_synthesis_error,
+            cancelled=self._on_cancelled,
+        )
+
+    def _on_run_start(self, context: RunContext) -> None:
+        self.update_progress(self._task_name(context), "Starting")
+
+    def _on_run_chunk(self, context: RunContext, chunk: LLMChunk) -> None:
+        if chunk.kind == "thinking":
+            details = f"{chunk.thinking_count} thinking tokens"
+            self.update_progress(self._task_name(context), "Thinking", details)
+        else:
+            details = f"{chunk.token_count} tokens"
+            self.update_progress(self._task_name(context), "Generating", details)
+
+    def _on_run_complete(self, context: RunContext, result: LLMResult) -> None:
+        status = f"Completed - {result.finish_reason or 'Done'}"
+        details = f"{result.token_count} tokens, {result.thinking_count} thinking"
+        self.update_progress(self._task_name(context), status, details)
+
+    def _on_run_error(self, context: RunContext, exc: BaseException) -> None:
+        self.update_progress(self._task_name(context), "Error", str(exc))
+
+    def _on_synthesis_start(self) -> None:
+        self.update_progress("Synthesis", "Combining results")
+
+    def _on_synthesis_chunk(self, chunk: LLMChunk) -> None:
+        if chunk.kind == "thinking":
+            self.update_progress("Synthesis", "Thinking", f"{chunk.thinking_count} thinking")
+        else:
+            self.update_progress("Synthesis", "Generating", f"{chunk.token_count} tokens")
+
+    def _on_synthesis_complete(self, result: LLMResult) -> None:
+        details = f"{result.token_count} tokens, {result.thinking_count} thinking"
+        self.update_progress("Synthesis", "Completed", details)
+
+    def _on_synthesis_error(self, exc: BaseException) -> None:
+        self.update_progress("Synthesis", "Error", str(exc))
+
+    def _on_cancelled(self) -> None:
+        for task_name in list(self.current_tasks.keys()):
+            self.update_progress(task_name, "Interrupted")
+
     async def action_submit_prompt(self) -> None:
         """Handle prompt submission via Ctrl+J"""
         prompt = self.prompt_input.text.strip()
@@ -201,42 +259,27 @@ class LLMProTUI(App):
         self.results_log.write(processing_msg)
 
         # Clear existing progress bars and create new ones
+        self.n_runs = self.config.n_runs
         self.clear_progress_tasks()
         self.create_progress_tasks()
 
-        # Create trace logger if requested
         trace_logger = None
         if self.enable_trace:
             trace_logger = TraceLogger(
+                trace_dir=self.config.trace_dir,
                 enabled=True,
                 compact_mode=self.trace_compact,
             )
 
+        processor = Processor(self.config, hooks=self._build_hooks())
+
         try:
-            # Call the main LLM function
-            result = await main(prompt, self.n_runs, show_progress=False, tui_app=self, trace_logger=trace_logger)
-
-            if result:
-                # Display result
-                assistant_header = Text("\n🤖 Assistant:", style="bold green")
-                self.results_log.write(assistant_header)
-                self.results_log.write(Markdown(result))
-
-                # Show trace info if enabled
-                if self.enable_trace and trace_logger and trace_logger.traces:
-                    stats = trace_logger.get_stats()
-                    trace_info = (f"📊 Debug Info: {stats['total_tasks']} tasks, "
-                               f"成功率: {stats['success_rate']:.2%}, "
-                               f"总token: {stats['total_tokens']}, "
-                               f"平均耗时: {stats['avg_duration_ms']:.0f}ms")
-                    debug_msg = Text(trace_info, style="dim")
-                    self.results_log.write(debug_msg)
-            else:
-                error_msg = Text("❌ No result received", style="red")
-                self.results_log.write(error_msg)
-
-        except Exception as e:
-            error_msg = Text(f"❌ Error: {str(e)}", style="bold red")
+            result = await processor.run(prompt, trace_logger=trace_logger)
+            self._display_result(result)
+            if self.enable_trace and trace_logger:
+                self._display_trace_info(trace_logger)
+        except Exception as exc:
+            error_msg = Text(f"❌ Error: {str(exc)}", style="bold red")
             self.results_log.write(error_msg)
 
         finally:
@@ -321,6 +364,45 @@ class LLMProTUI(App):
             task_info["progress"].progress = 60
         elif status == "Completed":
             task_info["progress"].progress = 100
+
+    def _display_result(self, result: ProcessorResult) -> None:
+        if not self.results_log:
+            return
+
+        output = result.best_text()
+        if output:
+            assistant_header = Text("\n🤖 Assistant:", style="bold green")
+            self.results_log.write(assistant_header)
+            self.results_log.write(Markdown(output))
+        else:
+            self.results_log.write(Text("❌ No result received", style="red"))
+
+        failures = [run for run in result.runs if run.error]
+        if failures:
+            warning_msg = Text(
+                f"⚠️  {len(failures)} runs encountered errors", style="yellow"
+            )
+            self.results_log.write(warning_msg)
+
+        if result.interrupted:
+            interrupted_msg = Text(
+                "⚠️  任务被中断，已返回部分结果", style="yellow"
+            )
+            self.results_log.write(interrupted_msg)
+
+    def _display_trace_info(self, trace_logger: TraceLogger) -> None:
+        if not self.results_log or not trace_logger.enabled or not trace_logger.traces:
+            return
+
+        stats = trace_logger.get_stats()
+        trace_info = (
+            f"📊 Debug Info: {stats['total_tasks']} tasks, "
+            f"成功率: {stats['success_rate']:.2%}, "
+            f"总token: {stats['total_tokens']}, "
+            f"平均耗时: {stats['avg_duration_ms']:.0f}ms"
+        )
+        debug_msg = Text(trace_info, style="dim")
+        self.results_log.write(debug_msg)
 
     def add_result(self, text: str, is_markdown: bool = False):
         """Add content to results log"""
@@ -468,13 +550,9 @@ class LLMProTUI(App):
         return super().check_action_enabled(action)
 
 
-def tui_main(args):
+def tui_main(config: Config) -> int:
     """Main TUI entry point."""
-    tui_app = LLMProTUI(
-        n_runs=args.n_runs,
-        enable_trace=args.trace,
-        trace_compact=args.trace_compact
-    )
+    tui_app = LLMProTUI(config)
     try:
         tui_app.run()
         return 0

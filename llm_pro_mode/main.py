@@ -1,15 +1,17 @@
 """Main entry point for LLM Pro Mode application."""
 
 import argparse
-import uvicorn
 import sys
 from pathlib import Path
 
-from .config import config, console
+import uvicorn
+
+from .config.runtime import ConfigLoader
 from .interfaces.cli import cli_main
 from .interfaces.tui import tui_main
-from .interfaces.api import app
-from .tracing.logger import TraceLogger
+from .interfaces.api import app as api_app, configure_runtime as configure_api_runtime
+from .interfaces.web import app as web_app, configure_runtime as configure_web_runtime
+from .logger import console, success, warning, error
 
 
 def setup_argument_parser():
@@ -213,92 +215,65 @@ def main():
         parser = setup_argument_parser()
         args = parser.parse_args()
 
+        loader = ConfigLoader()
+        state = loader.load(args)
+        config = state.config
+
         # Handle profile management commands first (these don't need full config)
         if args.list_profiles:
-            from .profile_manager import ProfileManager
-
-            manager = ProfileManager(args.config if hasattr(args, "config") else None)
-            manager.list_profiles()
+            state.list_profiles()
             return 0
 
         if args.show_profile:
-            from .profile_manager import ProfileManager
-
-            manager = ProfileManager(args.config if hasattr(args, "config") else None)
-            manager.show_profile(args.show_profile)
+            state.show_profile(args.show_profile)
             return 0
 
         if args.delete_profile:
-            from .profile_manager import ProfileManager
-
-            manager = ProfileManager(args.config if hasattr(args, "config") else None)
-            if manager.delete_profile(args.delete_profile):
-                console.print(f"[green]Profile '{args.delete_profile}' 已删除[/green]")
+            if state.delete_profile(args.delete_profile):
+                success(f"Profile '{args.delete_profile}' 已删除")
             return 0
 
         if args.set_default_profile:
-            from .profile_manager import ProfileManager
-
-            manager = ProfileManager(args.config if hasattr(args, "config") else None)
-            if manager.set_default_profile(args.set_default_profile):
-                console.print(
-                    f"[green]默认 profile 已设置为 '{args.set_default_profile}'[/green]"
-                )
+            if state.set_default_profile(args.set_default_profile):
+                success(f"默认 profile 已设置为 '{args.set_default_profile}'")
             return 0
-
-        # Update configuration from command line arguments
-        config.update_from_args(args)
 
         # Handle save-profile command (needs full config)
         if args.save_profile:
-            if config.save_current_as_profile(
-                args.save_profile, "Saved from command line"
-            ):
-                console.print(
-                    f"[green]配置已保存为 profile '{args.save_profile}'[/green]"
-                )
+            if state.save_profile(args.save_profile, "Saved from command line"):
+                success(f"配置已保存为 profile '{args.save_profile}'")
             else:
-                console.print(f"[red]保存 profile '{args.save_profile}' 失败[/red]")
+                error(f"保存 profile '{args.save_profile}' 失败")
             return 0
 
-        # Set up trace logging if requested
-        if args.trace:
-            # Just show info, actual trace loggers will be created as needed
-            trace_dir = Path(args.trace_dir)
+        # Ensure trace directory exists when tracing is enabled
+        if config.trace_enabled:
+            trace_dir = Path(config.trace_dir)
             trace_dir.mkdir(exist_ok=True)
-            mode_text = "简化模式" if args.trace_compact else "完整模式"
-            console.print(
-                f"[bold yellow]轨迹记录已启用 ({mode_text})，保存到: {args.trace_dir}/[/bold yellow]"
-            )
+            mode_text = "简化模式" if config.trace_compact else "完整模式"
+            warning(f"轨迹记录已启用 ({mode_text})，保存到: {trace_dir}/")
 
         # Display configuration summary
-        config_summary = config.get_effective_config_summary()
-        console.print(f"[dim]配置: {config_summary}[/dim]")
+        console.print(f"[dim]配置: {state.summary()}[/dim]")
 
         # Route to appropriate interface
         if args.serve:
-            console.print(
-                f"[bold green]Starting FastAPI server on port {config.port}[/bold green]"
-            )
-            uvicorn.run(app, host="0.0.0.0", port=config.port)
+            success(f"Starting FastAPI server on port {config.port}")
+            configure_api_runtime(state)
+            uvicorn.run(api_app, host="0.0.0.0", port=config.port)
             return 0
         elif args.web:
-            console.print(
-                f"[bold green]Starting Web UI mode on port {config.port}[/bold green]"
-            )
-            console.print(
-                f"[dim]Open http://localhost:{config.port} in your browser[/dim]"
-            )
-            from .interfaces.web import app as web_app
-
+            success(f"Starting Web UI mode on port {config.port}")
+            console.print(f"[dim]Open http://localhost:{config.port} in your browser[/dim]")
+            configure_web_runtime(state)
             uvicorn.run(web_app, host="0.0.0.0", port=config.port)
             return 0
         elif args.tui:
-            console.print("[bold green]Starting Terminal UI mode[/bold green]")
-            return tui_main(args)
+            success("Starting Terminal UI mode")
+            return tui_main(config)
         else:
-            console.print("[bold green]Running CLI mode[/bold green]")
-            return cli_main(args)
+            success("Running CLI mode")
+            return cli_main(args, config)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]👋 操作已取消，程序正常退出[/yellow]")

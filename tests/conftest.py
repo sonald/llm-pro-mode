@@ -11,7 +11,14 @@ import anyio
 from fastapi.testclient import TestClient
 from fastapi import WebSocket
 
-from llm_pro_mode.interfaces.web import WebSocketManager, WebSocketProgressTracker
+from llm_pro_mode.config import Config, RuntimeState
+from llm_pro_mode.interfaces.api import configure_runtime as configure_api_runtime
+from llm_pro_mode.interfaces.web import (
+    WebSocketManager,
+    WebSocketProgressTracker,
+    configure_runtime as configure_web_runtime,
+)
+from llm_pro_mode.profile_manager import ProfileManager
 from llm_pro_mode.tracing.logger import TraceLogger
 
 
@@ -45,6 +52,26 @@ def progress_tracker(websocket_manager, mock_websocket):
     connection_id = "test-connection-123"
     session_id = "test-session-456"
     return WebSocketProgressTracker(websocket_manager, connection_id, session_id)
+
+
+@pytest.fixture(autouse=True)
+def runtime_state(tmp_path):
+    """Configure runtime state for interfaces during tests."""
+    config = Config(
+        model_name="gpt-3.5-turbo",
+        api_base="https://api.example.com",
+        api_key="test-key",
+    )
+    trace_dir = tmp_path / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    config.trace_dir = str(trace_dir)
+
+    manager = ProfileManager(str(tmp_path / "profiles.json"))
+    state = RuntimeState(config=config, profile_manager=manager)
+
+    configure_web_runtime(state)
+    configure_api_runtime(state)
+    yield state
 
 
 @pytest.fixture

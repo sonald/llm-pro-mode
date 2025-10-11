@@ -6,13 +6,12 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Dict, Literal, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, Literal, Optional, Tuple
 
-from anyio.streams.memory import MemoryObjectSendStream
 from litellm import acompletion, token_counter
-from rich.progress import Progress, TaskID
 
-from ..config import config, console
+from ..config import Config
+from ..logger import error as log_error
 from ..tracing.logger import TraceLogger
 
 
@@ -66,11 +65,12 @@ class LLMResult:
 class TraceSession:
     """Utility class that manages trace lifecycle for an LLM request."""
 
-    def __init__(self, request: LLMRequest):
+    def __init__(self, request: LLMRequest, *, model_name: Optional[str]):
         self._logger = request.trace_logger
         self._trace_id = request.trace_id
         self._request = request
         self._task_trace: Optional[dict[str, Any]] = None
+        self._model_name = model_name or "unknown"
 
     def start(self) -> "TraceSession":
         """Start trace logging if available."""
@@ -83,7 +83,7 @@ class TraceSession:
 
             self._task_trace = self._logger.start_task(
                 task_id=self._trace_id,
-                model_name=config.model_name or "unknown",
+                model_name=self._model_name,
                 input_prompt=self._request.prompt_for_trace(),
                 metadata=metadata,
             )
@@ -105,12 +105,93 @@ class TraceSession:
 class LLMClient:
     """High-level helper that coordinates streaming LLM calls."""
 
-    def __init__(self):
-        self._completion_fn = acompletion
+    def __init__(
+        self,
+        *,
+        model_name: Optional[str],
+        api_base: Optional[str],
+        api_key: Optional[str],
+        default_temperature: float,
+        max_tokens: Optional[int],
+        completion_fn=None,
+    ) -> None:
+        self.model_name = model_name or "unknown"
+        self.api_base = api_base
+        self.api_key = api_key
+        self.default_temperature = default_temperature
+        self.max_tokens = max_tokens
+        self._completion_fn = completion_fn or acompletion
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        system: Optional[str] = None,
+        trace_logger: Optional[TraceLogger] = None,
+        trace_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        on_chunk: Optional[Callable[[LLMChunk], None]] = None,
+    ) -> LLMResult:
+        request = LLMRequest(
+            prompt=prompt,
+            system=system,
+            temperature=self._resolve_temperature(temperature),
+            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+            trace_logger=trace_logger,
+            trace_id=trace_id,
+            metadata=metadata or {},
+        )
+
+        parts: list[str] = []
+        finish_reason: Optional[str] = None
+        token_count = 0
+        thinking_count = 0
+
+        async for chunk in self.stream_chunks(request):
+            finish_reason = chunk.finish_reason or finish_reason
+            if on_chunk:
+                on_chunk(chunk)
+
+            if chunk.kind == "thinking":
+                thinking_count = chunk.thinking_count
+            elif chunk.kind == "content":
+                parts.append(chunk.text)
+                token_count = chunk.token_count
+
+        return LLMResult(
+            content="".join(parts),
+            finish_reason=finish_reason,
+            token_count=token_count,
+            thinking_count=thinking_count,
+        )
+
+    async def gather_result(self, request: LLMRequest) -> LLMResult:
+        """Compatibility helper that gathers chunks into a final result."""
+        parts: list[str] = []
+        finish_reason: Optional[str] = None
+        token_count = 0
+        thinking_count = 0
+
+        async for chunk in self.stream_chunks(request):
+            finish_reason = chunk.finish_reason or finish_reason
+            if chunk.kind == "thinking":
+                thinking_count = chunk.thinking_count
+            elif chunk.kind == "content":
+                parts.append(chunk.text)
+                token_count = chunk.token_count
+
+        return LLMResult(
+            content="".join(parts),
+            finish_reason=finish_reason,
+            token_count=token_count,
+            thinking_count=thinking_count,
+        )
 
     async def stream_chunks(self, request: LLMRequest) -> AsyncGenerator[LLMChunk, None]:
         """Stream normalized chunks from the configured LLM call."""
-        trace = TraceSession(request).start()
+        trace = TraceSession(request, model_name=self.model_name).start()
         token_count = 0
         thinking_count = 0
         finish_reason: Optional[str] = None
@@ -118,12 +199,17 @@ class LLMClient:
 
         payload: Dict[str, Any] = {
             "messages": request.build_messages(),
-            "model": config.model_name,
-            "base_url": config.api_base,
-            "api_key": config.api_key,
+            "model": self.model_name,
             "stream": True,
             "temperature": request.temperature,
         }
+
+        if self.api_base:
+            payload["base_url"] = self.api_base
+
+        if self.api_key:
+            payload["api_key"] = self.api_key
+
         if request.max_tokens is not None:
             payload["max_tokens"] = request.max_tokens
 
@@ -147,7 +233,7 @@ class LLMClient:
                 if reasoning_payload is not None:
                     normalized_reasoning = _normalize_reasoning_payload(reasoning_payload)
                     if normalized_reasoning:
-                        thinking_count += _count_tokens(normalized_reasoning)
+                        thinking_count += _count_tokens(normalized_reasoning, self.model_name)
                         trace.log_thinking(normalized_reasoning)
                         yield LLMChunk(
                             kind="thinking",
@@ -158,7 +244,7 @@ class LLMClient:
                         )
 
                 if hasattr(delta, "content") and delta.content:
-                    token_count += _count_tokens(delta.content)
+                    token_count += _count_tokens(delta.content, self.model_name)
                     trace.log_content(delta.content)
                     yield LLMChunk(
                         kind="content",
@@ -174,31 +260,58 @@ class LLMClient:
         finally:
             trace.finish(success=error is None, error_msg=str(error) if error else None)
 
-    async def gather_result(self, request: LLMRequest) -> LLMResult:
-        """Collect the full response content while streaming.
+    async def stream_text(
+        self,
+        prompt: str,
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        system: Optional[str] = None,
+        trace_logger: Optional[TraceLogger] = None,
+        trace_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Tuple[str, str], None]:
+        """Yield text chunks with retry support for streaming interfaces."""
 
-        Consumers who do not need per-chunk access can use this helper to
-        retrieve the aggregated content alongside counters.
-        """
-        parts: list[str] = []
-        finish_reason: Optional[str] = None
-        token_count = 0
-        thinking_count = 0
-
-        async for chunk in self.stream_chunks(request):
-            finish_reason = chunk.finish_reason or finish_reason
-            if chunk.kind == "thinking":
-                thinking_count = chunk.thinking_count
-            elif chunk.kind == "content":
-                parts.append(chunk.text)
-                token_count = chunk.token_count
-
-        return LLMResult(
-            content="".join(parts),
-            finish_reason=finish_reason,
-            token_count=token_count,
-            thinking_count=thinking_count,
+        request = LLMRequest(
+            prompt=prompt,
+            system=system,
+            temperature=self._resolve_temperature(temperature),
+            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+            trace_logger=trace_logger,
+            trace_id=trace_id,
+            metadata=metadata or {},
         )
+
+        max_attempts = 3
+        attempt = 0
+        last_error: Optional[BaseException] = None
+
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                async for chunk in self.stream_chunks(request):
+                    yield (chunk.kind, chunk.text)
+                return
+            except TRANSIENT_STREAM_ERRORS as exc:
+                last_error = exc
+                if attempt >= max_attempts:
+                    break
+                await asyncio.sleep(0.2 * attempt)
+                continue
+            except Exception as exc:  # pragma: no cover
+                log_error("Error calling LLM: %s", exc)
+                yield ("error", f"Error calling LLM: {exc}")
+                return
+
+        if last_error is not None:
+            log_error("Error calling LLM: %s", last_error)
+            yield ("error", f"Error calling LLM: {last_error}")
+
+    def _resolve_temperature(self, value: Optional[float]) -> float:
+        if value is not None:
+            return value
+        return self.default_temperature
 
 
 def _normalize_reasoning_payload(value: Any) -> str:
@@ -221,168 +334,15 @@ def _normalize_reasoning_payload(value: Any) -> str:
     return str(value)
 
 
-def _resolve_temperature(value: Optional[float]) -> float:
-    """Return effective sampling temperature with global fallback."""
-    if value is not None:
-        return value
-    return config.temperature
-
-
-def _count_tokens(text: str) -> int:
+def _count_tokens(text: str, model_name: str) -> int:
     """Count tokens for the provided text with graceful fallback."""
     if not text:
         return 0
 
-    model_name = config.model_name or "gpt-3.5-turbo"
     try:
         return int(token_counter(model=model_name, text=text))
     except Exception:
-        # Fall back to an approximate character-based heuristic when token counting fails.
         return max(1, len(text) // 4)
-
-
-async def call_llm_tui(
-    prompt: str,
-    tx: MemoryObjectSendStream,
-    temperature: Optional[float] = None,
-    system: Optional[str] = None,
-    tui_app=None,
-    task_name: str = "Task",
-    trace_logger: Optional[TraceLogger] = None,
-    trace_id: Optional[str] = None,
-):
-    """Call LLM with TUI integration for progress updates."""
-    max_token_limit = config.max_tokens if config.max_tokens is not None else None
-
-    request = LLMRequest(
-        prompt=prompt,
-        system=system,
-        temperature=_resolve_temperature(temperature),
-        max_tokens=max_token_limit,
-        trace_logger=trace_logger,
-        trace_id=trace_id,
-    )
-    client = LLMClient()
-
-    if tui_app:
-        tui_app.update_progress(task_name, "Starting")
-
-    parts: list[str] = []
-    token_count = 0
-    thinking_count = 0
-    finish_reason: Optional[str] = None
-
-    try:
-        async for chunk in client.stream_chunks(request):
-            finish_reason = chunk.finish_reason or finish_reason
-            if chunk.kind == "thinking":
-                thinking_count = chunk.thinking_count
-                if tui_app:
-                    tui_app.update_progress(
-                        task_name,
-                        "Thinking",
-                        f"{thinking_count} thinking tokens",
-                    )
-            elif chunk.kind == "content":
-                parts.append(chunk.text)
-                token_count = chunk.token_count
-                if tui_app:
-                    tui_app.update_progress(
-                        task_name,
-                        "Generating",
-                        f"{token_count} tokens",
-                    )
-
-        result_text = "".join(parts)
-        async with tx:
-            await tx.send(result_text)
-
-        if tui_app:
-            tui_app.update_progress(
-                task_name,
-                f"Completed - {finish_reason or 'Done'}",
-                f"{token_count} tokens, {thinking_count} thinking",
-            )
-        return result_text
-    except Exception as exc:  # pragma: no cover - integration behaviour validated elsewhere
-        if tui_app:
-            tui_app.update_progress(task_name, "Error", str(exc))
-        console.print(f"[bold red]Error calling LLM: {exc}[/]")
-
-
-async def call_llm(
-    prompt: str,
-    tx: MemoryObjectSendStream,
-    temperature: Optional[float] = None,
-    system: Optional[str] = None,
-    progress: Optional[Progress] = None,
-    task_id: Optional[TaskID] = None,
-    trace_logger: Optional[TraceLogger] = None,
-    trace_id: Optional[str] = None,
-):
-    """Call LLM with progress bar integration."""
-    max_token_limit = config.max_tokens if config.max_tokens is not None else None
-
-    request = LLMRequest(
-        prompt=prompt,
-        system=system,
-        temperature=_resolve_temperature(temperature),
-        max_tokens=max_token_limit,
-        trace_logger=trace_logger,
-        trace_id=trace_id,
-    )
-    client = LLMClient()
-
-    parts: list[str] = []
-    token_count = 0
-    thinking_count = 0
-    finish_reason: Optional[str] = None
-
-    try:
-        async for chunk in client.stream_chunks(request):
-            finish_reason = chunk.finish_reason or finish_reason
-            if chunk.kind == "thinking":
-                thinking_count = chunk.thinking_count
-                if progress is not None and task_id is not None:
-                    progress.update(
-                        task_id,
-                        token_count=token_count,
-                        thinking_count=thinking_count,
-                    )
-            elif chunk.kind == "content":
-                parts.append(chunk.text)
-                token_count = chunk.token_count
-                if progress is not None and task_id is not None:
-                    progress.update(
-                        task_id,
-                        token_count=token_count,
-                        thinking_count=thinking_count,
-                    )
-
-        result_text = "".join(parts)
-        async with tx:
-            await tx.send(result_text)
-
-        if progress is not None and task_id is not None:
-            progress.update(
-                task_id,
-                description=f"{task_id} {finish_reason or 'Done'}",
-                token_count=token_count,
-                thinking_count=thinking_count,
-            )
-            progress.stop_task(task_id)
-
-        return result_text
-    except Exception as exc:  # pragma: no cover - integration behaviour validated elsewhere
-        if progress is not None and task_id is not None:
-            progress.update(
-                task_id,
-                description=f"{task_id} Error",
-                token_count=token_count,
-                thinking_count=thinking_count,
-            )
-            progress.stop_task(task_id)
-        console.print(f"[bold red]Error calling LLM: {exc}[/]")
 
 
 TRANSIENT_STREAM_ERRORS: Tuple[type[BaseException], ...] = (
@@ -394,53 +354,33 @@ TRANSIENT_STREAM_ERRORS: Tuple[type[BaseException], ...] = (
 
 async def call_llm_streaming(
     prompt: str,
+    *,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     system: Optional[str] = None,
     trace_logger: Optional[TraceLogger] = None,
     trace_id: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    config: Optional[Config] = None,
 ) -> AsyncGenerator[Tuple[str, str], None]:
-    """
-    Call LLM with streaming support for WebSocket integration.
+    """Compatibility wrapper that streams text using a temporary LLM client."""
 
-    Yields:
-        Tuple[str, str]: (chunk_type, content) where chunk_type is 'thinking' or 'content'
-    """
-    effective_max_tokens = max_tokens if max_tokens is not None else config.max_tokens
+    cfg = config or Config()
+    client = LLMClient(
+        model_name=cfg.model_name,
+        api_base=cfg.api_base,
+        api_key=cfg.api_key,
+        default_temperature=cfg.temperature,
+        max_tokens=cfg.max_tokens,
+    )
 
-    request = LLMRequest(
-        prompt=prompt,
+    async for chunk_type, content in client.stream_text(
+        prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
         system=system,
-        temperature=_resolve_temperature(temperature),
-        max_tokens=effective_max_tokens,
         trace_logger=trace_logger,
         trace_id=trace_id,
-        metadata=metadata or {},
-    )
-    client = LLMClient()
-
-    max_attempts = 3
-    attempt = 0
-    last_error: Optional[BaseException] = None
-
-    while attempt < max_attempts:
-        attempt += 1
-        try:
-            async for chunk in client.stream_chunks(request):
-                yield (chunk.kind, chunk.text)
-            return
-        except TRANSIENT_STREAM_ERRORS as exc:
-            last_error = exc
-            if attempt >= max_attempts:
-                break
-
-            # Brief exponential backoff before retrying
-            await asyncio.sleep(0.2 * attempt)
-            continue
-        except Exception as exc:
-            yield ("error", f"Error calling LLM: {exc}")
-            return
-
-    if last_error is not None:
-        yield ("error", f"Error calling LLM: {last_error}")
+        metadata=metadata,
+    ):
+        yield (chunk_type, content)

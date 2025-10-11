@@ -1,194 +1,248 @@
 """Main processing logic for parallel LLM calls and synthesis."""
 
-import uuid
-from typing import Optional
-import anyio
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TaskID
+from __future__ import annotations
 
-from .llm_client import call_llm, call_llm_tui
-from .synthesizer import synthesize_result, synthesize_result_tui
-from ..config import config, console
+import uuid
+from dataclasses import dataclass
+from typing import Callable, List, Optional
+
+import anyio
+
+from .llm_client import LLMChunk, LLMClient, LLMResult
+from .synthesizer import synthesize_result
+from ..config import Config
+from ..logger import get_logger
 from ..tracing.logger import TraceLogger
 
 
-async def main(
-    prompt: str,
-    n_runs: int = 3,
-    show_progress: bool = False,
-    tui_app=None,
-    trace_logger: Optional[TraceLogger] = None,
-):
-    """Main processing function for parallel LLM calls and synthesis."""
-    (tx, rx) = anyio.create_memory_object_stream(n_runs)
-    progress: Optional[Progress] = None
+_logger = get_logger()
 
-    try:
-        if show_progress:
-            progress = Progress(
-                SpinnerColumn(spinner_name="dots"),
-                TextColumn("{task.description}"),
-                TextColumn("[dim]{task.fields[thinking_count]} thinking"),
-                TextColumn("[dim]{task.fields[token_count]} tokens"),
-                TimeElapsedColumn(),
-                expand=True,
-                console=console,
-            )
-            progress.start()
+
+@dataclass(frozen=True)
+class RunContext:
+    """Metadata describing a single model invocation."""
+
+    run_id: str
+    index: int
+    trace_id: Optional[str]
+
+
+@dataclass
+class RunOutput:
+    """Result of a single candidate generation."""
+
+    context: RunContext
+    result: Optional[LLMResult] = None
+    error: Optional[BaseException] = None
+
+
+@dataclass
+class ProcessorResult:
+    """Aggregated execution outcome."""
+
+    prompt: str
+    runs: List[RunOutput]
+    final: Optional[LLMResult]
+    partial_text: Optional[str] = None
+    interrupted: bool = False
+
+    def best_text(self) -> Optional[str]:
+        if self.final:
+            return self.final.content
+        if self.partial_text:
+            return self.partial_text
+        for run in self.runs:
+            if run.result:
+                return run.result.content
+        return None
+
+
+@dataclass
+class ProcessorHooks:
+    """Optional callbacks for progress reporting."""
+
+    run_start: Optional[Callable[[RunContext], None]] = None
+    run_chunk: Optional[Callable[[RunContext, LLMChunk], None]] = None
+    run_complete: Optional[Callable[[RunContext, LLMResult], None]] = None
+    run_error: Optional[Callable[[RunContext, BaseException], None]] = None
+    synthesis_start: Optional[Callable[[], None]] = None
+    synthesis_chunk: Optional[Callable[[LLMChunk], None]] = None
+    synthesis_complete: Optional[Callable[[LLMResult], None]] = None
+    synthesis_error: Optional[Callable[[BaseException], None]] = None
+    cancelled: Optional[Callable[[], None]] = None
+
+
+class Processor:
+    """Coordinates parallel candidate generation and synthesis."""
+
+    def __init__(self, config: Config, hooks: Optional[ProcessorHooks] = None):
+        self._config = config
+        self._hooks = hooks or ProcessorHooks()
+
+    def _build_client(self, *, default_temperature: float) -> LLMClient:
+        return LLMClient(
+            model_name=self._config.model_name,
+            api_base=self._config.api_base,
+            api_key=self._config.api_key,
+            default_temperature=default_temperature,
+            max_tokens=self._config.max_tokens,
+        )
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        n_runs: Optional[int] = None,
+        trace_logger: Optional[TraceLogger] = None,
+    ) -> ProcessorResult:
+        run_count = n_runs or self._config.n_runs
+        run_outputs: List[RunOutput] = []
+        interrupted = False
+
+        run_client = self._build_client(default_temperature=self._config.temperature)
+
+        cancel_exc = anyio.get_cancelled_exc_class()
 
         try:
-            # Create task group to spawn n_runs tasks
             async with anyio.create_task_group() as tg:
-                for i in range(n_runs):
-                    # Generate unique trace_id for each run
+                for index in range(run_count):
                     trace_id = (
-                        f"run_{i + 1}_{uuid.uuid4().hex[:8]}"
-                        if trace_logger and trace_logger.enabled
+                        f"run_{index + 1}_{uuid.uuid4().hex[:8]}"
+                        if trace_logger and getattr(trace_logger, "enabled", False)
                         else None
                     )
+                    context = RunContext(
+                        run_id=f"run_{index + 1}",
+                        index=index,
+                        trace_id=trace_id,
+                    )
+                    tg.start_soon(
+                        self._execute_single_run,
+                        run_client,
+                        prompt,
+                        context,
+                        trace_logger,
+                        run_outputs,
+                    )
+        except (KeyboardInterrupt, cancel_exc):
+            interrupted = True
+            if self._hooks.cancelled:
+                self._hooks.cancelled()
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.error("候选运行过程中出现未处理异常: %s", exc)
+            run_outputs.append(
+                RunOutput(
+                    context=RunContext(run_id="run-error", index=-1, trace_id=None),
+                    error=exc,
+                )
+            )
 
-                    if progress is not None:
-                        task_id = progress.add_task(
-                            description=f"Run {i + 1}",
-                            start=True,
-                            token_count=0,
-                            thinking_count=0,
-                        )
-                        tg.start_soon(
-                            call_llm,
-                            prompt,
-                            tx.clone(),
-                            config.temperature,
-                            None,
-                            progress,
-                            task_id,
-                            trace_logger,
-                            trace_id,
-                        )
-                    elif tui_app:
-                        tg.start_soon(
-                            call_llm_tui,
-                            prompt,
-                            tx.clone(),
-                            config.temperature,
-                            None,
-                            tui_app,
-                            f"Run {i + 1}",
-                            trace_logger,
-                            trace_id,
-                        )
-                    else:
-                        tg.start_soon(
-                            call_llm,
-                            prompt,
-                            tx.clone(),
-                            config.temperature,
-                            None,
-                            None,
-                            None,
-                            trace_logger,
-                            trace_id,
-                        )
-            tx.close()
+        run_outputs.sort(key=lambda item: item.context.index)
+        successful = [output for output in run_outputs if output.result]
 
-            candidates = []
-            async with rx:
-                async for result in rx:
-                    candidates.append(result)
+        final_result: Optional[LLMResult] = None
+        partial_text: Optional[str] = None
 
-        except (KeyboardInterrupt, anyio.get_cancelled_exc_class()):
-            # 清理进度条
-            if progress:
-                progress.stop()
-            if tui_app:
-                # 更新所有运行中的任务状态为中断
-                for i in range(n_runs):
-                    tui_app.update_progress(f"Run {i + 1}", "Interrupted")
-                tui_app.update_progress("Synthesis", "Interrupted")
-
-            # 关闭发送端确保接收端能正常结束
-            try:
-                tx.close()
-            except anyio.ClosedResourceError:
-                pass  # 已经关闭
-
-            # 收集已完成的部分结果
-            candidates = []
-            try:
-                async with rx:
-                    async for result in rx:
-                        candidates.append(result)
-            except (anyio.ClosedResourceError, anyio.get_cancelled_exc_class()):
-                pass  # 正常的资源关闭
-
-            # 如果有部分结果，尝试快速合成
-            if candidates:
-                console.print(f"\n[yellow]⚠️  任务被中断，正在处理已完成的 {len(candidates)} 个结果...[/yellow]")
-
-                # 对已有结果进行简化合成
-                if len(candidates) == 1:
-                    return candidates[0]
-                else:
-                    # 简单拼接多个结果而不是复杂合成
-                    combined = "\n\n".join(f"结果 {i+1}:\n{result}" for i, result in enumerate(candidates))
-                    return f"[注意：任务被中断，以下是已完成的部分结果]\n\n{combined}"
+        if interrupted:
+            if len(successful) == 1:
+                final_result = successful[0].result
+            elif len(successful) > 1:
+                combined = "\n\n".join(
+                    f"结果 {i + 1}:\n{output.result.content}"
+                    for i, output in enumerate(successful)
+                    if output.result
+                )
+                partial_text = (
+                    "[注意：任务被中断，以下是已完成的部分结果]\n\n" + combined
+                )
+        elif successful:
+            if len(successful) == 1:
+                final_result = successful[0].result
             else:
-                console.print("\n[yellow]⚠️  没有完成的结果可以返回[/yellow]")
-                return None
+                final_result = await self._run_synthesis(
+                    [output.result.content for output in successful if output.result],
+                    trace_logger=trace_logger,
+                )
+                if final_result is None:
+                    final_result = successful[0].result
 
-        synth_task: Optional[TaskID] = None
-        synth_trace_id = (
+        return ProcessorResult(
+            prompt=prompt,
+            runs=run_outputs,
+            final=final_result,
+            partial_text=partial_text,
+            interrupted=interrupted,
+        )
+
+    async def _execute_single_run(
+        self,
+        client: LLMClient,
+        prompt: str,
+        context: RunContext,
+        trace_logger: Optional[TraceLogger],
+        sink: List[RunOutput],
+    ) -> None:
+        if self._hooks.run_start:
+            self._hooks.run_start(context)
+
+        def _on_chunk(chunk: LLMChunk) -> None:
+            if self._hooks.run_chunk:
+                self._hooks.run_chunk(context, chunk)
+
+        try:
+            result = await client.run(
+                prompt,
+                trace_logger=trace_logger,
+                trace_id=context.trace_id,
+                metadata={"run_index": context.index},
+                on_chunk=_on_chunk,
+            )
+            sink.append(RunOutput(context=context, result=result))
+            if self._hooks.run_complete:
+                self._hooks.run_complete(context, result)
+        except Exception as exc:  # pragma: no cover - integration level
+            sink.append(RunOutput(context=context, error=exc))
+            if self._hooks.run_error:
+                self._hooks.run_error(context, exc)
+            _logger.warning("候选运行失败 (run=%s): %s", context.run_id, exc)
+
+    async def _run_synthesis(
+        self,
+        candidates: List[str],
+        *,
+        trace_logger: Optional[TraceLogger],
+    ) -> Optional[LLMResult]:
+        if self._hooks.synthesis_start:
+            self._hooks.synthesis_start()
+
+        synthesis_client = self._build_client(
+            default_temperature=self._config.synthesis_temperature
+        )
+
+        trace_id = (
             f"synthesis_{uuid.uuid4().hex[:8]}"
-            if trace_logger and trace_logger.enabled
+            if trace_logger and getattr(trace_logger, "enabled", False)
             else None
         )
 
-        if progress is not None:
-            synth_task = progress.add_task(
-                description="Synthesizing",
-                start=True,
-                token_count=0,
-                thinking_count=0,
-            )
+        def _on_chunk(chunk: LLMChunk) -> None:
+            if self._hooks.synthesis_chunk:
+                self._hooks.synthesis_chunk(chunk)
+
+        try:
             result = await synthesize_result(
-                candidates, progress, synth_task, trace_logger, synth_trace_id
+                synthesis_client,
+                candidates,
+                temperature=self._config.synthesis_temperature,
+                trace_logger=trace_logger,
+                trace_id=trace_id,
+                on_chunk=_on_chunk,
             )
-            progress.update(synth_task, description="Synthesizing done")
-            progress.stop_task(synth_task)
-        elif tui_app:
-            if tui_app:
-                tui_app.update_progress("Synthesis", "Combining results")
-            result = await synthesize_result_tui(
-                candidates, tui_app, trace_logger, synth_trace_id
-            )
-            if tui_app:
-                tui_app.update_progress("Synthesis", "Completed")
-        else:
-            result = await synthesize_result(
-                candidates, None, None, trace_logger, synth_trace_id
-            )
-
-        # Save traces and show statistics
-        if trace_logger and trace_logger.enabled and trace_logger.traces:
-            trace_file = trace_logger.save_traces()
-            stats = trace_logger.get_stats()
-            console.print(f"\n[bold green]轨迹已保存到: {trace_file}[/bold green]")
-            console.print(
-                f"[dim]统计信息: {stats['total_tasks']} 个任务, "
-                f"成功率: {stats['success_rate']:.2%}, "
-                f"总token: {stats['total_tokens']}, "
-                f"平均耗时: {stats['avg_duration_ms']:.0f}ms[/dim]"
-            )
-
-        return result
-
-    except (KeyboardInterrupt, anyio.get_cancelled_exc_class()):
-        # 这个中断来自合成阶段
-        console.print("\n[yellow]⚠️  合成阶段被中断[/yellow]")
-        # 传播中断信号到上层
-        raise KeyboardInterrupt("任务被用户中断")
-    except Exception as e:
-        console.print(f"[bold red]❌ 处理错误: {e}[/bold red]")
-        return None
-    finally:
-        if progress is not None:
-            progress.stop()
+            if self._hooks.synthesis_complete:
+                self._hooks.synthesis_complete(result)
+            return result
+        except Exception as exc:  # pragma: no cover - integration level
+            if self._hooks.synthesis_error:
+                self._hooks.synthesis_error(exc)
+            _logger.error("结果合成失败: %s", exc)
+            return None

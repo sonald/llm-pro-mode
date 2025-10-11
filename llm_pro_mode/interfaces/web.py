@@ -10,7 +10,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..config import config
+from ..config import Config
+from ..config.runtime import RuntimeState
 from ..models.schemas import (
     WebSocketMessage,
     TaskUpdate,
@@ -19,11 +20,31 @@ from ..models.schemas import (
     ProfileSummary,
     ProfileSelectRequest,
 )
-from ..core.processor import main as process_main
+from ..core.processor import Processor, ProcessorHooks, RunContext, ProcessorResult
+from ..core.llm_client import LLMChunk, LLMResult
+from ..logger import get_logger
 from ..tracing.logger import TraceLogger
 
 
 CancelledError = asyncio.CancelledError
+
+_runtime_state: Optional[RuntimeState] = None
+_logger = get_logger()
+
+
+def configure_runtime(state: RuntimeState) -> None:
+    global _runtime_state
+    _runtime_state = state
+
+
+def _require_state() -> RuntimeState:
+    if _runtime_state is None:
+        raise RuntimeError("Web interface runtime state not configured")
+    return _runtime_state
+
+
+def _current_config() -> Config:
+    return _require_state().config
 
 
 def _normalize_stream_content(value) -> str:
@@ -357,6 +378,129 @@ class WebSocketProgressTracker:
         })
 
 
+class WebProcessorHooksAdapter:
+    """Adapter that bridges processor hooks to WebSocket tracker events."""
+
+    def __init__(self, tracker: WebSocketProgressTracker):
+        self.tracker = tracker
+        self._run_progress: Dict[str, float] = {}
+        self._synthesis_progress: float = 0
+
+    def make_hooks(self) -> ProcessorHooks:
+        return ProcessorHooks(
+            run_start=self.on_run_start,
+            run_chunk=self.on_run_chunk,
+            run_complete=self.on_run_complete,
+            run_error=self.on_run_error,
+            synthesis_start=self.on_synthesis_start,
+            synthesis_chunk=self.on_synthesis_chunk,
+            synthesis_complete=self.on_synthesis_complete,
+            synthesis_error=self.on_synthesis_error,
+            cancelled=self.on_cancelled,
+        )
+
+    def on_run_start(self, context: RunContext) -> None:
+        self._run_progress[context.run_id] = 10.0
+        asyncio.create_task(
+            self.tracker.start_task(
+                context.run_id,
+                f"Run {context.index + 1}",
+                {"run_index": context.index},
+            )
+        )
+        asyncio.create_task(
+            self.tracker.update_task_progress(context.run_id, 10.0)
+        )
+
+    def on_run_chunk(self, context: RunContext, chunk: LLMChunk) -> None:
+        current = self._run_progress.get(context.run_id, 10.0)
+        if chunk.kind == "thinking":
+            current = min(60.0, current + 2.0)
+            asyncio.create_task(
+                self.tracker.update_task_progress(
+                    context.run_id,
+                    current,
+                    thinking=chunk.text,
+                )
+            )
+        else:
+            current = min(95.0, current + 1.0)
+            asyncio.create_task(
+                self.tracker.update_task_progress(
+                    context.run_id,
+                    current,
+                    content=chunk.text,
+                )
+            )
+        self._run_progress[context.run_id] = current
+
+    def on_run_complete(self, context: RunContext, result: LLMResult) -> None:
+        self._run_progress.pop(context.run_id, None)
+        asyncio.create_task(
+            self.tracker.complete_task(
+                context.run_id,
+                success=True,
+                thinking="",
+                content=result.content,
+                status="completed",
+            )
+        )
+
+    def on_run_error(self, context: RunContext, exc: BaseException) -> None:
+        self._run_progress.pop(context.run_id, None)
+        asyncio.create_task(
+            self.tracker.complete_task(
+                context.run_id,
+                success=False,
+                error=str(exc),
+                status="failed",
+            )
+        )
+
+    def on_synthesis_start(self) -> None:
+        self._synthesis_progress = 40.0
+        asyncio.create_task(self.tracker.start_synthesis())
+
+    def on_synthesis_chunk(self, chunk: LLMChunk) -> None:
+        if chunk.kind == "thinking":
+            self._synthesis_progress = max(self._synthesis_progress, 60.0)
+            asyncio.create_task(
+                self.tracker.update_task_progress(
+                    "synthesis",
+                    self._synthesis_progress,
+                    thinking=chunk.text,
+                )
+            )
+        else:
+            self._synthesis_progress = max(self._synthesis_progress, 80.0)
+            asyncio.create_task(
+                self.tracker.update_task_progress(
+                    "synthesis",
+                    self._synthesis_progress,
+                    content=chunk.text,
+                )
+            )
+
+    def on_synthesis_complete(self, result: LLMResult) -> None:
+        asyncio.create_task(
+            self.tracker.complete_synthesis(
+                success=True,
+                content=result.content,
+                status="completed",
+            )
+        )
+
+    def on_synthesis_error(self, exc: BaseException) -> None:
+        asyncio.create_task(
+            self.tracker.complete_synthesis(
+                success=False,
+                error=str(exc),
+                status="failed",
+            )
+        )
+
+    def on_cancelled(self) -> None:
+        asyncio.create_task(self.tracker.cancel_active_tasks("Cancelled"))
 # Global WebSocket manager instance
 ws_manager = WebSocketManager()
 
@@ -373,15 +517,10 @@ def create_web_app() -> FastAPI:
 
     def build_profile_response() -> ProfileListResponse:
         """Aggregate profile metadata for API responses."""
+        state = _require_state()
+        manager = state.profile_manager
 
-        if not config.profile_manager:
-            return ProfileListResponse(
-                profiles=[],
-                active_profile=None,
-                default_profile=None,
-            )
-
-        config_file = config.profile_manager.load_config()
+        config_file = manager.load_config()
         profiles = [
             ProfileSummary(
                 name=name,
@@ -393,7 +532,7 @@ def create_web_app() -> FastAPI:
             for name, profile in config_file.profiles.items()
         ]
 
-        active_profile = config.get_active_profile_name()
+        active_profile = state.active_profile_name()
         default_profile = config_file.default_profile or None
 
         return ProfileListResponse(
@@ -410,11 +549,8 @@ def create_web_app() -> FastAPI:
     @app.post("/api/profiles/select", response_model=ProfileListResponse)
     async def select_profile(request: ProfileSelectRequest):
         """Apply a profile and optionally mark it as default."""
-
-        if not config.profile_manager:
-            raise HTTPException(status_code=400, detail="Profile management not configured")
-
-        success = config.apply_profile(request.name, make_default=request.make_default)
+        state = _require_state()
+        success = state.apply_profile(request.name, make_default=request.make_default)
         if not success:
             raise HTTPException(status_code=404, detail="Profile not found")
 
@@ -548,206 +684,47 @@ async def process_main_with_websocket(
     prompt: str,
     n_runs: int,
     progress_tracker: WebSocketProgressTracker,
-    trace_logger: Optional[TraceLogger] = None
-):
-    """Process completion with WebSocket progress updates."""
-    import anyio
-    from ..core.llm_client import call_llm
-    from ..core.synthesizer import synthesize_result
+    trace_logger: Optional[TraceLogger] = None,
+) -> str:
+    """Process completion with WebSocket progress updates using the processor."""
 
-    # Create memory stream for results
-    (tx, rx) = anyio.create_memory_object_stream(n_runs)
+    config = _current_config()
+    hooks_adapter = WebProcessorHooksAdapter(progress_tracker)
+    processor = Processor(config, hooks=hooks_adapter.make_hooks())
 
     try:
-        # Start individual tasks
-        async with anyio.create_task_group() as tg:
-            for i in range(n_runs):
-                task_id = f"run_{i + 1}"
-                await progress_tracker.start_task(task_id, f"Run {i + 1}")
-
-                # Generate unique trace_id for each run
-                trace_id = (
-                    f"run_{i + 1}_{uuid.uuid4().hex[:8]}"
-                    if trace_logger and trace_logger.enabled
-                    else None
-                )
-
-                tg.start_soon(
-                    call_llm_with_websocket,
-                    prompt,
-                    tx.clone(),
-                    config.temperature,
-                    None,
-                    progress_tracker,
-                    task_id,
-                    trace_logger,
-                    trace_id,
-                )
-
-        if hasattr(tx, "aclose"):
-            with suppress(Exception):
-                await tx.aclose()
-        else:  # pragma: no cover - fallback for older anyio versions
-            with suppress(Exception):
-                tx.close()
-
-        # Collect results
-        candidates = []
-        async with rx:
-            async for result in rx:
-                candidates.append(result)
-
-        # Start synthesis
-        await progress_tracker.start_synthesis()
-
-        # Synthesize results
-        synth_trace_id = (
-            f"synthesis_{uuid.uuid4().hex[:8]}"
-            if trace_logger and trace_logger.enabled
-            else None
+        result = await processor.run(
+            prompt,
+            n_runs=n_runs,
+            trace_logger=trace_logger,
         )
-
-        print(f"[DEBUG] Starting synthesis with {len(candidates)} candidates")
-        result = await synthesize_result_websocket(
-            candidates, progress_tracker, trace_logger, synth_trace_id
-        )
-        print(f"[DEBUG] Synthesis completed")
-
-        return result
-
-    except Exception as e:
-        await progress_tracker.send_error(f"Processing error: {str(e)}")
+    except Exception as exc:
+        await progress_tracker.send_error(f"Processing error: {exc}")
+        _logger.error("Web processing error: %s", exc)
         raise
-    finally:
-        if hasattr(tx, "aclose"):
-            with suppress(Exception):
-                await tx.aclose()
-        else:
-            with suppress(Exception):
-                tx.close()
+
+    final_text = result.best_text() or ""
+
+    if hooks_adapter._synthesis_progress == 0:
+        await progress_tracker.start_synthesis()
+        status = "cancelled" if result.interrupted else "completed"
+        await progress_tracker.complete_synthesis(
+            success=not result.interrupted,
+            status=status,
+            content=result.partial_text or final_text,
+            error="Cancelled by user" if result.interrupted else None,
+        )
+    elif result.interrupted:
+        await progress_tracker.complete_synthesis(
+            success=False,
+            status="cancelled",
+            content=result.partial_text or final_text,
+            error="Cancelled by user",
+        )
+
+    return final_text
 
 
-async def call_llm_with_websocket(
-    prompt: str,
-    tx,
-    temperature: Optional[float],
-    max_tokens: Optional[int],
-    progress_tracker: WebSocketProgressTracker,
-    task_id: str,
-    trace_logger: Optional[TraceLogger],
-    trace_id: Optional[str],
-):
-    """Call LLM with WebSocket progress updates."""
-    from ..core.llm_client import call_llm_streaming
-
-    task_trace = None
-    response_content = ""
-
-    async with tx:
-        try:
-            # Start task trace
-            effective_temperature = temperature if temperature is not None else config.temperature
-            effective_max_tokens = max_tokens if max_tokens is not None else config.max_tokens
-
-            if trace_logger:
-                task_trace = trace_logger.start_task(
-                    trace_id or task_id,
-                    config.model_name,
-                    prompt,
-                    {"temperature": effective_temperature, "max_tokens": effective_max_tokens}
-                )
-
-            # Update progress to show started
-            await progress_tracker.update_task_progress(task_id, 10)
-
-            # Make streaming call
-            thinking_content = ""
-            progress = 10
-
-            print(f"[DEBUG] Starting streaming call for task {task_id}")
-
-            async for chunk_type, content in call_llm_streaming(
-                prompt,
-                temperature=effective_temperature,
-                max_tokens=effective_max_tokens,
-                system=None,
-                trace_logger=trace_logger,
-                trace_id=trace_id,
-                metadata={"task_id": task_id},
-            ):
-                normalized_content = _normalize_stream_content(content)
-                preview = normalized_content[:50]
-                print(f"[DEBUG] Task {task_id} received {chunk_type}: {preview}...")
-
-                if chunk_type == "thinking":
-                    thinking_content += normalized_content
-                    if trace_logger and task_trace and normalized_content:
-                        trace_logger.log_thinking(task_trace, normalized_content)
-
-                    # Update progress for thinking (10-60%)
-                    progress = min(60, progress + 2)
-                    await progress_tracker.update_task_progress(
-                        task_id, progress, thinking=normalized_content
-                    )
-
-                elif chunk_type == "content":
-                    response_content += normalized_content
-                    if trace_logger and task_trace and normalized_content:
-                        trace_logger.log_content(task_trace, normalized_content)
-
-                    # Update progress for content (60-95%)
-                    progress = min(95, progress + 1)
-                    await progress_tracker.update_task_progress(
-                        task_id, progress, content=normalized_content
-                    )
-
-                elif chunk_type == "error":
-                    print(f"[DEBUG] Error in streaming for task {task_id}: {normalized_content}")
-                    # Don't re-raise, just break out of loop
-                    break
-
-            print(f"[DEBUG] Task {task_id} completed successfully")
-
-            # Complete task
-            if trace_logger and task_trace:
-                trace_logger.finish_task(task_trace, success=True)
-
-            await progress_tracker.complete_task(task_id, success=True)
-
-            # Send result to stream
-            try:
-                await tx.send(response_content)
-            except Exception as tx_error:
-                print(f"[DEBUG] Error sending to tx for task {task_id}: {tx_error}")
-
-        except CancelledError:
-            print(f"[DEBUG] Task {task_id} cancelled")
-
-            if trace_logger and task_trace:
-                trace_logger.finish_task(task_trace, success=False, error_msg="Cancelled")
-
-            await progress_tracker.complete_task(
-                task_id,
-                success=False,
-                error="Cancelled by user",
-                status="cancelled",
-            )
-            raise
-
-        except Exception as e:
-            print(f"[DEBUG] Exception in task {task_id}: {e}")
-
-            # Handle error
-            if trace_logger and task_trace:
-                trace_logger.finish_task(task_trace, success=False, error_msg=str(e))
-
-            await progress_tracker.complete_task(task_id, success=False, error=str(e))
-
-            # Send empty result to avoid blocking
-            try:
-                await tx.send("")
-            except Exception as tx_error:
-                print(f"[DEBUG] Error sending empty result for task {task_id}: {tx_error}")
 
 
 async def synthesize_result_websocket(
@@ -757,6 +734,7 @@ async def synthesize_result_websocket(
     trace_id: Optional[str] = None,
 ) -> str:
     """Synthesize multiple candidate results using WebSocket streaming."""
+    config = _current_config()
     from ..core.llm_client import call_llm_streaming
 
     try:
@@ -811,6 +789,7 @@ async def synthesize_result_websocket(
             trace_logger=trace_logger,
             trace_id=trace_id,
             metadata={"phase": "synthesis"},
+            config=config,
         ):
             normalized_content = _normalize_stream_content(content)
             preview = normalized_content[:50]

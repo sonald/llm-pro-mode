@@ -7,12 +7,22 @@ from unittest.mock import AsyncMock
 
 from litellm import token_counter
 
+from llm_pro_mode.config import Config
 from llm_pro_mode.core.llm_client import (
     LLMClient,
     LLMRequest,
     _normalize_reasoning_payload,
 )
-from llm_pro_mode.config import config
+
+
+def _make_client(config: Config) -> LLMClient:
+    return LLMClient(
+        model_name=config.model_name,
+        api_base=config.api_base,
+        api_key=config.api_key,
+        default_temperature=config.temperature,
+        max_tokens=config.max_tokens,
+    )
 
 
 @pytest.mark.asyncio
@@ -45,7 +55,8 @@ async def test_stream_chunks_normalizes_reasoning_payload(mock_trace_logger):
         )
 
     completion_mock = AsyncMock(return_value=response_stream())
-    client = LLMClient()
+    test_config = Config(model_name="gpt-3.5-turbo")
+    client = _make_client(test_config)
     client._completion_fn = completion_mock  # Inject mock transport
 
     request = LLMRequest(
@@ -59,7 +70,7 @@ async def test_stream_chunks_normalizes_reasoning_payload(mock_trace_logger):
         chunks.append(chunk)
 
     assert [chunk.kind for chunk in chunks] == ["thinking", "content"]
-    expected_model = config.model_name or "gpt-3.5-turbo"
+    expected_model = test_config.model_name or "gpt-3.5-turbo"
     assert chunks[0].text == "FirstSecond"
     assert chunks[0].thinking_count == token_counter(
         model=expected_model, text="FirstSecond"
@@ -118,13 +129,14 @@ async def test_gather_result_accumulates_text_and_counts():
         )
 
     completion_mock = AsyncMock(return_value=response_stream())
-    client = LLMClient()
+    test_config = Config(model_name="gpt-3.5-turbo")
+    client = _make_client(test_config)
     client._completion_fn = completion_mock
 
     request = LLMRequest(prompt="Test prompt")
     result = await client.gather_result(request)
 
-    expected_model = config.model_name or "gpt-3.5-turbo"
+    expected_model = test_config.model_name or "gpt-3.5-turbo"
     assert result.content == "Hello World"
     assert result.token_count == token_counter(
         model=expected_model, text="Hello World"

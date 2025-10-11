@@ -5,6 +5,7 @@ import json
 import asyncio
 from unittest.mock import Mock, AsyncMock, patch
 
+from llm_pro_mode.core.llm_client import LLMChunk, LLMResult
 from llm_pro_mode.interfaces.web import (
     WebSocketManager,
     WebSocketProgressTracker,
@@ -190,21 +191,44 @@ class TestWebUIIntegration:
             await ws_manager.connect(mock_websocket, connection_id)
             ws_manager.connection_tasks[connection_id] = session_id
 
-            async def mock_call_llm_streaming(
-                prompt,
-                temperature=None,
-                max_tokens=None,
-                system=None,
-                trace_logger=None,
-                trace_id=None,
-                metadata=None,
-            ):
-                if system:
-                    yield ("thinking", [{"type": "text", "text": "Combining candidates"}])
-                    yield ("content", "Final synthesized answer")
-                else:
-                    yield ("thinking", [{"type": "text", "text": "Analyzing"}])
-                    yield ("content", f"Candidate response for {prompt}")
+            def fake_client_factory(*args, **kwargs):
+                class FakeClient:
+                    async def run(
+                        self,
+                        prompt,
+                        *,
+                        temperature=None,
+                        system=None,
+                        trace_logger=None,
+                        trace_id=None,
+                        metadata=None,
+                        on_chunk=None,
+                        **_extra,
+                    ):
+                        if system:
+                            if on_chunk:
+                                on_chunk(LLMChunk("thinking", "Combining candidates", 0, 0))
+                                on_chunk(LLMChunk("content", "Final synthesized answer", 0, 0))
+                            return LLMResult(
+                                content="Final synthesized answer",
+                                finish_reason="stop",
+                                token_count=0,
+                                thinking_count=0,
+                            )
+                        else:
+                            thinking_text = "Analyzing"
+                            content_text = f"Candidate response for {prompt}"
+                            if on_chunk:
+                                on_chunk(LLMChunk("thinking", thinking_text, 0, 0))
+                                on_chunk(LLMChunk("content", content_text, 0, 0))
+                            return LLMResult(
+                                content=content_text,
+                                finish_reason="stop",
+                                token_count=0,
+                                thinking_count=0,
+                            )
+
+                return FakeClient()
 
             request_data = {
                 "prompt": "Integration flow prompt",
@@ -212,9 +236,11 @@ class TestWebUIIntegration:
                 "enable_trace": False,
             }
 
-            with patch('llm_pro_mode.core.llm_client.call_llm_streaming', side_effect=mock_call_llm_streaming), \
+            with patch('llm_pro_mode.core.processor.Processor._build_client', side_effect=fake_client_factory), \
                  patch('llm_pro_mode.interfaces.web.ws_manager', ws_manager):
                 await handle_completion_request(connection_id, session_id, request_data)
+
+            await asyncio.sleep(0)  # allow async hook tasks to flush
 
             sent_messages = [json.loads(call.args[0]) for call in mock_websocket.send_text.call_args_list]
             message_types = [message["type"] for message in sent_messages]
