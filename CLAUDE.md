@@ -56,12 +56,14 @@ llm_pro_mode/
 ### Installation
 
 ```bash
-# Development installation
+# Development installation (editable mode)
 pip install -e .
 
 # Verify installation
 llm-pro-mode --help
 ```
+
+**Note on Package Structure**: The project uses explicit package discovery in `pyproject.toml` to only include the `llm_pro_mode` package. The `desktop/`, `traces/`, and `docs/` directories are excluded from the Python package to avoid conflicts during installation.
 
 ### Running the Application
 
@@ -271,7 +273,33 @@ Message types:
 
 **YAML Output** (`tracing/yaml_dumper.py`): Custom YAML serialization handling multiline strings and special characters for human-readable trace files.
 
-## Desktop Application (Tauri)
+## Desktop Application Architecture (Tauri + Rust)
+
+### Rust Backend (`desktop/src-tauri/src/lib.rs`)
+
+The Tauri desktop wrapper provides native window management and Python backend lifecycle:
+
+**Key Components**:
+- `spawn_backend()`: Launches Python FastAPI server as child process with proper `PYTHONPATH` configuration
+- `wait_for_server()`: Polls TCP connection until backend is ready (15 second timeout)
+- `shutdown_backend()`: Cleanly terminates Python process on app exit
+- `project_root()`: Resolves project directory at build time for reliable path resolution
+
+**Python Interpreter Selection**:
+1. Check `LLM_PRO_PYTHON` environment variable (highest priority)
+2. Fall back to `python3` (Unix) or `python` (Windows)
+3. Set `PYTHONPATH` to project root so Python can import `llm_pro_mode`
+
+**macOS-Specific Focus Management**:
+- Uses `cocoa` and `objc` crates for NSApp API access
+- `force_activate()`: Calls `NSApp().activateIgnoringOtherApps_(YES)` to bring app to foreground
+- Window activation sequence in `RunEvent::Ready` (not `setup()`):
+  1. Force activate app (macOS App level)
+  2. Show window (macOS Key Window level)
+  3. Set focus (macOS First Responder level)
+- Window initially `visible: false` in `tauri.conf.json` to avoid WebKit navigation timing issues
+
+### Desktop Application (Tauri)
 
 Located in `desktop/` directory. Tauri app automatically:
 - Starts FastAPI backend on random available port
@@ -281,10 +309,26 @@ Located in `desktop/` directory. Tauri app automatically:
 **Prerequisites**:
 - Rust (2021 edition)
 - `cargo` and `tauri-cli`
-- Python environment accessible via `python3` or `LLM_PRO_PYTHON`
+- Python environment with llm-pro-mode installed: `pip install -e .`
+- Python accessible via `python3` or `LLM_PRO_PYTHON` environment variable
+
+**Important**: If you have multiple Python environments (virtualenv, conda, pyenv), you MUST set `LLM_PRO_PYTHON`:
+
+```bash
+# Find which Python has llm-pro-mode installed
+python3 -m pip show llm-pro-mode | grep Location
+
+# Set the correct Python interpreter
+export LLM_PRO_PYTHON=/path/to/your/python3
+# Example: export LLM_PRO_PYTHON=$HOME/miniforge3/bin/python3
+```
 
 **Development**:
 ```bash
+# First time setup
+pip install -e .  # Install package in editable mode
+
+# Start desktop app
 cd desktop
 cargo tauri dev
 ```
@@ -295,6 +339,21 @@ cd desktop
 cargo tauri build
 # Outputs in desktop/src-tauri/target/release/bundle/
 ```
+
+**Common Desktop Issues**:
+
+1. **`ModuleNotFoundError: No module named 'uvicorn'`**
+   - Cause: Tauri using wrong Python interpreter
+   - Fix: Set `LLM_PRO_PYTHON` to the Python where you ran `pip install -e .`
+
+2. **`Backend server failed to start in time`**
+   - Cause: Missing dependencies or port conflict
+   - Fix: Test backend manually: `python3 -m llm_pro_mode.desktop --port 8000`
+
+3. **macOS keyboard focus issue** (already fixed in main)
+   - The desktop app uses `activateIgnoringOtherApps_(YES)` via cocoa FFI
+   - Window activation happens in `RunEvent::Ready` for proper timing
+   - See `docs/MACOS_FOCUS_FIX.md` for technical details
 
 ## Common Development Tasks
 
