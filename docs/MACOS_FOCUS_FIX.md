@@ -220,23 +220,110 @@ let is_active: bool = msg_send![app, isActive];
 - 这是 Objective-C 消息传递机制的 FFI 调用
 - `sel!` 宏生成选择器（selector）
 
+## 运行前的配置
+
+### 1. 安装 Python 依赖
+
+桌面应用需要 llm-pro-mode Python 包：
+
+```bash
+cd /path/to/llm-pro-mode
+pip install -e .
+```
+
+### 2. 配置 Python 解释器（如有多个 Python 环境）
+
+如果系统中有多个 Python 环境（如虚拟环境、conda、pyenv 等），需要指定正确的 Python 解释器：
+
+```bash
+# 方法一：临时设置（仅当前终端有效）
+export LLM_PRO_PYTHON=/path/to/your/python3
+
+# 方法二：写入 shell 配置文件（永久生效）
+echo 'export LLM_PRO_PYTHON=/Users/你的用户名/miniforge3/bin/python3' >> ~/.zshrc
+source ~/.zshrc
+```
+
+**如何找到正确的 Python 路径**：
+
+```bash
+# 查看当前 python3 位置
+which python3
+
+# 查看 llm-pro-mode 安装在哪个 Python
+python3 -m pip show llm-pro-mode | grep Location
+```
+
+### 3. 启动桌面应用
+
+```bash
+cd desktop
+cargo tauri dev
+```
+
 ## 验证方法
 
-启动应用后检查日志输出：
+### 检查日志输出
+
+启动应用后应该看到以下日志：
 
 ```
 [Desktop] macOS activation policy set to Regular
+[Desktop] Selected port: xxxxx
+[Desktop] Backend process spawned
+[Desktop] Waiting for server on port xxxxx...
+INFO:     Uvicorn running on http://127.0.0.1:xxxxx
+[Desktop] Server ready on port xxxxx after XX attempts
+[Desktop] Navigating to: http://127.0.0.1:xxxxx
+[Desktop] Navigation complete
 [Desktop] Web UI loaded, waiting for Ready event to show/focus
 [Desktop] RunEvent::Ready - activating and showing window
 [Desktop] App forcefully activated
 [Desktop] Window shown
 [Desktop] Window focused
+INFO:     127.0.0.1:xxxxx - "GET / HTTP/1.1" 200 OK
+INFO:     ('127.0.0.1', xxxxx) - "WebSocket /ws" [accepted]
 ```
 
-**成功标志**：
+### 成功标志
+
 - ✅ 窗口出现后可以**直接输入**，无需点击
 - ✅ 窗口标题栏高亮显示（表示是活跃窗口）
 - ✅ 输入框自动获得焦点
+- ✅ FastAPI 后端正常启动（看到 INFO: Uvicorn running）
+
+### 常见问题排查
+
+**问题 1**: `ModuleNotFoundError: No module named 'uvicorn'`
+
+**原因**: Tauri 使用的 Python 解释器中未安装 llm-pro-mode 包。
+
+**解决方案**:
+```bash
+# 1. 确认 Tauri 使用哪个 Python（查看错误堆栈）
+#    例如：File "/Users/xxx/miniforge3/lib/python3.10/runpy.py"
+#    说明使用的是 /Users/xxx/miniforge3/bin/python3
+
+# 2. 使用该 Python 安装包
+/Users/xxx/miniforge3/bin/python3 -m pip install -e .
+
+# 3. 或者设置 LLM_PRO_PYTHON 环境变量
+export LLM_PRO_PYTHON=/Users/xxx/miniforge3/bin/python3
+```
+
+**问题 2**: `Backend server failed to start in time`
+
+**原因**: Python 后端启动超时（通常是依赖问题）。
+
+**解决方案**:
+```bash
+# 1. 手动测试后端是否能启动
+python3 -m llm_pro_mode.desktop --port 8000
+
+# 2. 检查是否有错误信息
+# 3. 确保所有依赖已安装
+pip install -e .
+```
 
 ## 相关文件清单
 

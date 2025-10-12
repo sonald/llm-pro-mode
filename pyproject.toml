@@ -1,3 +1,11 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["llm_pro_mode*"]
+exclude = ["tests*", "desktop*", "traces*", "docs*"]
+
 [project]
 name = "llm-pro-mode"
 version = "0.2.0"
