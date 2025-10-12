@@ -40,7 +40,16 @@ def find_available_port(start: int = 4000, end: int = 4999) -> int:
 def run_desktop_server(config: DesktopServerConfig) -> None:
     """Launch the FastAPI Web UI under uvicorn for the desktop shell."""
 
-    from .interfaces.web import app as web_app
+    # Initialize runtime configuration before starting the server
+    from .config.runtime import ConfigLoader
+    from .interfaces.web import app as web_app, configure_runtime
+
+    # Load configuration from environment and profiles
+    config_loader = ConfigLoader()
+    runtime_state = config_loader.load()
+
+    # Configure the web interface runtime context
+    configure_runtime(runtime_state)
 
     host = config.host
     port = config.port or find_available_port()

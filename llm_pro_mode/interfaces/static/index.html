@@ -9,6 +9,54 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css">
     <!-- Math rendering CSS -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+
+    <!-- Desktop Focus Management -->
+    <script>
+        // Detect if running in Tauri desktop environment
+        if (window.__TAURI__ || window.__LLM_PRO_DESKTOP__) {
+            console.log('[Desktop] Tauri environment detected, initializing focus management');
+
+            // Aggressive focus management for macOS
+            const ensureFocus = () => {
+                console.log('[Desktop] Ensuring window focus');
+                window.focus();
+
+                // Focus the first input field if available
+                const messageInput = document.getElementById('message-input');
+                if (messageInput) {
+                    setTimeout(() => {
+                        messageInput.focus();
+                        console.log('[Desktop] Input field focused');
+                    }, 100);
+                }
+            };
+
+            // Run on page load
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', ensureFocus);
+            } else {
+                ensureFocus();
+            }
+
+            // Re-focus when page becomes visible
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) {
+                    console.log('[Desktop] Page visible, restoring focus');
+                    ensureFocus();
+                }
+            });
+
+            // Re-focus on any user interaction
+            ['mousedown', 'touchstart', 'keydown'].forEach(eventType => {
+                window.addEventListener(eventType, () => {
+                    if (document.activeElement === document.body) {
+                        console.log('[Desktop] User interaction detected, restoring focus');
+                        window.focus();
+                    }
+                }, { capture: true, once: false });
+            });
+        }
+    </script>
 </head>
 <body>
     <div class="app-container">

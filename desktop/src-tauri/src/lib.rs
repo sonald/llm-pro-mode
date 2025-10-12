@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::{env, io, thread, time::Duration};
 
-use tauri::{plugin::Builder as PluginBuilder, App, AppHandle, Manager, RunEvent, Url, WindowEvent, Wry};
+use tauri::{App, AppHandle, Manager, WindowEvent};
 
 struct DesktopServerState {
     child: Mutex<Option<Child>>,
@@ -88,12 +88,17 @@ fn find_open_port() -> io::Result<u16> {
 
 fn wait_for_server(port: u16, timeout: Duration) -> bool {
     let attempts = (timeout.as_millis() / 200).max(1) as usize;
-    for _ in 0..attempts {
+    eprintln!("[Desktop] Waiting for server on port {}...", port);
+    for i in 0..attempts {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            eprintln!("[Desktop] Server ready on port {} after {} attempts", port, i + 1);
+            // Give the server a bit more time to fully initialize routes
+            thread::sleep(Duration::from_millis(500));
             return true;
         }
         thread::sleep(Duration::from_millis(200));
     }
+    eprintln!("[Desktop] Server failed to start after {} attempts", attempts);
     false
 }
 
@@ -126,25 +131,42 @@ fn load_web_ui(app: &mut App) -> Result<(), Box<dyn Error>> {
     app.manage(DesktopServerState::new());
 
     let port = find_open_port()?;
+    eprintln!("[Desktop] Selected port: {}", port);
+
     let child = spawn_backend(port)?;
+    eprintln!("[Desktop] Backend process spawned");
+
     let state = app.state::<DesktopServerState>();
     state.store(child);
 
-    if !wait_for_server(port, Duration::from_secs(10)) {
+    if !wait_for_server(port, Duration::from_secs(15)) {
         state.kill();
         return Err(Box::new(BackendStartupError("Backend server failed to start in time")));
     }
 
     if let Some(window) = app.get_webview_window("main") {
-        let target_url = Url::parse(&format!("http://127.0.0.1:{}", port))?;
-        window
-            .navigate(target_url)
-            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+        let target_url = format!("http://127.0.0.1:{}", port);
+        eprintln!("[Desktop] Navigating to: {}", target_url);
 
-        let script = format!("window.__LLM_PRO_DESKTOP__ = {{ port: {} }};", port);
+        // Navigate using the Tauri API - more reliable than JS eval
         window
-            .eval(&script)
-            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+            .navigate(target_url.parse()?)
+            .map_err(|e| {
+                eprintln!("[Desktop] Navigation failed: {}", e);
+                Box::new(e) as Box<dyn Error>
+            })?;
+
+        // Set desktop flag after navigation
+        let script = format!("window.__LLM_PRO_DESKTOP__ = {{ port: {} }};", port);
+        thread::sleep(Duration::from_millis(1000)); // Wait for page to load
+        if let Err(e) = window.eval(&script) {
+            eprintln!("[Desktop] Warning: Failed to set desktop flag: {}", e);
+        }
+
+        eprintln!("[Desktop] Navigation complete");
+    } else {
+        eprintln!("[Desktop] Error: Main window not found");
+        return Err(Box::new(BackendStartupError("Main window not found")));
     }
 
     Ok(())
@@ -156,36 +178,120 @@ fn shutdown_backend(app: &AppHandle) {
     }
 }
 
+// macOS-specific commands for window activation and focus management
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn force_activate(app: AppHandle) -> Result<(), String> {
+    use tauri::ActivationPolicy;
+
+    app.set_activation_policy(ActivationPolicy::Regular)
+        .map_err(|e| e.to_string())?;
+
+    unsafe {
+        use cocoa::appkit::{NSApp, NSApplication};
+        use cocoa::base::YES;
+        NSApp().activateIgnoringOtherApps_(YES);
+    }
+
+    eprintln!("[Desktop] App forcefully activated");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn debug_focus_state() -> String {
+    unsafe {
+        use cocoa::appkit::NSApp;
+        use cocoa::base::id;
+        use objc::{msg_send, sel, sel_impl};
+
+        let app: id = NSApp();
+        let is_active: bool = msg_send![app, isActive];
+        format!("active_app={}", is_active)
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(
-            PluginBuilder::<Wry>::new("desktop-navigation")
-                .on_navigation(|_, url| {
-                    match url.scheme() {
-                        "http" | "https" | "ws" | "wss" => match url.host_str() {
-                            Some("127.0.0.1") | Some("localhost") => true,
-                            _ => false,
-                        },
-                        _ => true,
-                    }
-                })
-                .build(),
-        )
+    let mut builder = tauri::Builder::default();
+
+    // Register macOS-specific commands
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.invoke_handler(tauri::generate_handler![force_activate, debug_focus_state]);
+    }
+
+    builder
         .setup(|app| {
+            // macOS: Set activation policy but don't show/focus yet
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::ActivationPolicy;
+                if let Err(e) = app.handle().set_activation_policy(ActivationPolicy::Regular) {
+                    eprintln!("[Desktop] Warning: Failed to set activation policy: {}", e);
+                } else {
+                    eprintln!("[Desktop] macOS activation policy set to Regular");
+                }
+            }
+
+            // Load web UI (navigation only, window stays hidden initially)
             load_web_ui(app)?;
+            eprintln!("[Desktop] Web UI loaded, waiting for Ready event to show/focus");
+
             Ok(())
         })
         .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::CloseRequested { .. }) {
-                shutdown_backend(&window.app_handle());
+            match event {
+                WindowEvent::CloseRequested { .. } => {
+                    shutdown_backend(&window.app_handle());
+                }
+                _ => {}
             }
         })
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|app_handle, event| {
-            if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-                shutdown_backend(app_handle);
+            use tauri::RunEvent;
+            match event {
+                RunEvent::Ready | RunEvent::Resumed => {
+                    eprintln!("[Desktop] RunEvent::Ready - activating and showing window");
+
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        // Critical activation sequence for macOS:
+                        // 1. Force activate the app (bring to front)
+                        #[cfg(target_os = "macos")]
+                        {
+                            if let Err(e) = force_activate(app_handle.clone()) {
+                                eprintln!("[Desktop] Warning: Failed to force activate: {}", e);
+                            }
+                        }
+
+                        // 2. Show the window
+                        if let Err(e) = window.show() {
+                            eprintln!("[Desktop] Warning: Failed to show window: {}", e);
+                        } else {
+                            eprintln!("[Desktop] Window shown");
+                        }
+
+                        // 3. Set focus on the window
+                        if let Err(e) = window.set_focus() {
+                            eprintln!("[Desktop] Warning: Failed to set focus: {}", e);
+                        } else {
+                            eprintln!("[Desktop] Window focused");
+                        }
+
+                        // 4. Debug: Check activation state
+                        #[cfg(target_os = "macos")]
+                        {
+                            let state = debug_focus_state();
+                            eprintln!("[Desktop] Focus state: {}", state);
+                        }
+                    }
+                }
+                RunEvent::Exit | RunEvent::ExitRequested { .. } => {
+                    shutdown_backend(app_handle);
+                }
+                _ => {}
             }
         });
 }
